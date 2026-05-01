@@ -6,25 +6,41 @@
 
 """PSF-related functions.
 
-PSF convolution functions:
-    PSF for image patch simulation.
-        - conv_psf(): a single PSF kernel for the whole patch, no spatial variation or defocus.
-        - conv_psf_depth_interp(): depth-varying PSF for the whole patch, no spatial variation.
-    
-    PSF map.
-        - conv_psf_map(): a PSF map for the whole image, spatial varying across different image patches, no spatial variation within the patch, no defocus.
-        - conv_psf_map_depth_interp(): depth-varying PSF map for the whole image, spatial varying across different image patches, no spatial variation within the patch.
-    
-    Per-pixel PSF. 
-        - splat_psf_per_pixel(): each pixel has a unique PSF, spatial variance and defocus.
+Image formation with a per-pixel PSF is fundamentally a splatting/scattering
+operation: each source pixel distributes its energy to neighboring output
+pixels according to its local PSF. When the PSF is spatially invariant, this
+splatting operation is equivalent to convolution with that fixed PSF kernel, so
+convolution can be used as an efficient implementation.
+
+Rendering functions:
+    Spatially invariant PSF.
+        - conv_psf(): render with one fixed PSF kernel for the whole image.
+        - conv_psf_depth_interp(): render with a depth-dependent but
+          spatially invariant PSF, interpolated from reference depth kernels.
+
+    Spatially varying PSF map.
+        - conv_psf_map(): split the image into grid patches and render each
+          patch with its grid-cell PSF.
+        - conv_psf_map_depth_interp(): split the image into grid patches and
+          render each patch with depth-interpolated PSFs for that grid cell.
+
+    Per-pixel PSF.
+        - splat_psf_per_pixel(): splat each source pixel with its own local
+          PSF. This supports full spatial variation and defocus, but is more
+          memory intensive than convolution-based approximations.
+
+    Layered depth rendering.
+        - conv_psf_occlusion(): layer-based depth rendering with
+          occlusion-aware back-to-front compositing.
 
 Other functions:
     - crop_psf_map(): crop a PSF map to a smaller size.
     - interp_psf_map(): interpolate a PSF map to a different grid size.
     - read_psf_map(): read a PSF map from a file.
     - rotate_psf(): rotate a PSF kernel.
-    - solve_psf(): solve a PSF kernel from a given image and rendered image.
-    - solve_psf_map(): solve a PSF map from a given image and rendered image.
+    - solve_psf(): estimate one spatially invariant PSF from an
+      input/output image pair.
+    - solve_psf_map(): estimate a packed PSF map from input/output image patches.
 """
 
 import cv2 as cv
@@ -35,16 +51,16 @@ from ..config import DELTA, PSF_KS
 
 
 # ================================================
-# PSF convolution for image simulation
+# PSF rendering for image simulation
 # ================================================
 
 def conv_psf(img, psf):
-    """Convolve an image batch with a single spatially-uniform PSF.
+    """Render an image batch with one spatially invariant PSF.
 
-    Applies a per-channel 2-D convolution using ``reflect`` boundary padding
-    so that the output has the same spatial dimensions as the input.  The PSF
-    is internally flipped to convert the cross-correlation implemented by
-    ``F.conv2d`` into a true convolution.
+    Applies a per-channel 2-D convolution using reflect padding so that the
+    output has the same spatial dimensions as the input. The PSF is internally
+    flipped to convert the cross-correlation implemented by ``F.conv2d`` into
+    convolution.
 
     Args:
         img (torch.Tensor): Input image batch, shape ``[B, C, H, W]``.
@@ -78,11 +94,12 @@ def conv_psf(img, psf):
     return img_render
 
 def conv_psf_map(img, psf_map):
-    """Convolve an image batch with a spatially-varying PSF map.
+    """Render an image batch with a spatially varying PSF map.
 
     Divides the image into ``grid_h × grid_w`` non-overlapping patches and
-    convolves each patch with its corresponding PSF kernel.  The results are
-    assembled back into a full-resolution output via a weighted blending step.
+    convolves each patch with its corresponding PSF kernel. The full image is
+    padded before patch extraction to avoid artificial seams from independent
+    per-patch padding.
 
     Args:
         img (torch.Tensor): Input image batch, shape ``[B, C, H, W]``.
@@ -132,19 +149,107 @@ def conv_psf_map(img, psf_map):
 
     return img_render
 
+def splat_psf_per_pixel(img, psf, chunk_size=None):
+    """Render an image batch by splatting each pixel through its own PSF.
 
-def conv_psf_map_depth_interp(img, depth, psf_map, psf_depths, interp_mode="depth"):
-    """Convolve an image with a PSF map. Within each image patch, do interpolation with a depth map.
+    Uses a different PSF kernel for each source pixel and accumulates the
+    scattered contributions with ``F.fold``. When ``chunk_size`` is set, source
+    pixels are processed tile by tile to reduce peak memory while preserving
+    PSF contributions that cross tile boundaries.
 
     Args:
-        img: (B, 3, H, W), [0, 1]
-        depth: (B, 1, H, W), (-inf, 0)
-        psf_map: (grid_h, grid_w, num_depth, 3, ks, ks)
-        psf_depths: (num_depth). (-inf, 0). Used to interpolate psf_map.
-        interp_mode: "depth" or "disparity". If "disparity", weights are calculated based on disparity (1/depth).
+        img (Tensor): The image to be blurred (B, C, H, W).
+        psf (torch.Tensor): Per-pixel local PSFs, shape
+            ``[H, W, C, ks, ks]``. ``ks`` may be odd or even.
+        chunk_size (int, optional): Source tile size for memory-efficient
+            rendering. If ``None``, render the whole image at once.
     
     Returns:
-        img_render: (B, 3, H, W), [0, 1]
+        img_render (Tensor): Rendered image (B, C, H, W).
+    """
+    B, C, H, W = img.shape
+    H_psf, W_psf, C_psf, ks, _ = psf.shape
+    assert C == C_psf, ("Image and PSF channels mismatch.")
+    assert H == H_psf and W == W_psf, ("Image and PSF size mismatch.")
+
+    pad_h_left = (ks - 1) // 2
+    pad_h_right = ks // 2
+    pad_w_left = (ks - 1) // 2
+    pad_w_right = ks // 2
+
+    if chunk_size is None:
+        img_expand = img.unsqueeze(-1).unsqueeze(-1)  # [B, C, H, W, 1, 1]
+        kernels = psf.permute(2, 0, 1, 3, 4).unsqueeze(0)  # [1, C, H, W, ks, ks]
+        y = img_expand * kernels  # [B, C, H, W, ks, ks]
+        y = y.permute(0, 1, 4, 5, 2, 3).reshape(B, C * ks * ks, H * W)
+        img_render = F.fold(y, (H + ks - 1, W + ks - 1), (ks, ks), padding=0)
+    else:
+        assert chunk_size > 0, "chunk_size must be positive."
+
+        img_render = img.new_zeros(
+            B,
+            C,
+            H + pad_h_left + pad_h_right,
+            W + pad_w_left + pad_w_right,
+        )
+
+        for y0 in range(0, H, chunk_size):
+            y1 = min(y0 + chunk_size, H)
+            for x0 in range(0, W, chunk_size):
+                x1 = min(x0 + chunk_size, W)
+                img_patch = img[:, :, y0:y1, x0:x1]
+                psf_patch = psf[y0:y1, x0:x1, :, :, :]
+
+                patch_h, patch_w = y1 - y0, x1 - x0
+                img_patch = img_patch.unsqueeze(-1).unsqueeze(-1)
+                kernels = psf_patch.permute(2, 0, 1, 3, 4).unsqueeze(0)
+                y = img_patch * kernels
+                y = y.permute(0, 1, 4, 5, 2, 3).reshape(
+                    B, C * ks * ks, patch_h * patch_w
+                )
+                img_render[:, :, y0 : y1 + ks - 1, x0 : x1 + ks - 1] += (
+                    F.fold(
+                        y,
+                        (patch_h + ks - 1, patch_w + ks - 1),
+                        (ks, ks),
+                        padding=0,
+                    )
+                )
+
+    return img_render[
+        :,
+        :,
+        pad_h_left : pad_h_left + H,
+        pad_w_left : pad_w_left + W,
+    ]
+
+
+# ====================================================
+# Depth varying PSF convolution for image simulation
+# ====================================================
+
+def conv_psf_map_depth_interp(img, depth, psf_map, psf_depths, interp_mode="depth"):
+    """Render with a spatially varying, depth-interpolated PSF map.
+
+    The image is divided into PSF-map grid cells. For each cell, the image
+    patch is convolved with all reference-depth PSFs for that cell, then the
+    convolved results are blended per pixel using interpolation weights from
+    the depth map.
+
+    Args:
+        img (torch.Tensor): Image batch, shape ``[B, C, H, W]``, values in
+            ``[0, 1]``.
+        depth (torch.Tensor): Depth map, shape ``[B, 1, H, W]``, values in
+            ``(-inf, 0)`` using the negative-depth convention.
+        psf_map (torch.Tensor): PSF map, shape
+            ``[grid_h, grid_w, num_depth, C, ks, ks]``.
+        psf_depths (torch.Tensor): Reference depths, shape ``[num_depth]``,
+            values in ``(-inf, 0)``. Used to interpolate ``psf_map``.
+        interp_mode (str): ``"depth"`` for linear depth interpolation or
+            ``"disparity"`` for linear interpolation in ``1 / depth``.
+    
+    Returns:
+        torch.Tensor: Rendered image, shape ``[B, C, H, W]``.
     """
     assert interp_mode in ["depth", "disparity"], f"interp_mode must be 'depth' or 'disparity', got {interp_mode}"
     assert depth.min() < 0 and depth.max() < 0, f"depth must be negative, got {depth.min()} and {depth.max()}"
@@ -440,93 +545,30 @@ def conv_psf_occlusion(img, depth, psf_kernels, psf_depths):
     return result
 
 
-def splat_psf_per_pixel(img, psf, chunk_size=None):
-    """Render an image batch by splatting each pixel through its own PSF.
-
-    Uses a different PSF kernel for each input pixel and accumulates the
-    scattered contributions with a folding approach. Application example:
-    blurs an image with dynamic Gaussian blur.
-
-    Args:
-        img (Tensor): The image to be blurred (B, C, H, W).
-        psf (Tensor): Per pixel local PSFs (H, W, C, ks, ks). ks can be odd or even.
-        chunk_size (int, optional): Source tile size for memory-efficient
-            rendering. If ``None``, render the whole image at once.
-    
-    Returns:
-        img_render (Tensor): Rendered image (B, C, H, W).
-    """
-    B, C, H, W = img.shape
-    H_psf, W_psf, C_psf, ks, _ = psf.shape
-    assert C == C_psf, ("Image and PSF channels mismatch.")
-    assert H == H_psf and W == W_psf, ("Image and PSF size mismatch.")
-
-    pad_h_left = (ks - 1) // 2
-    pad_h_right = ks // 2
-    pad_w_left = (ks - 1) // 2
-    pad_w_right = ks // 2
-
-    if chunk_size is None:
-        img_expand = img.unsqueeze(-1).unsqueeze(-1)  # [B, C, H, W, 1, 1]
-        kernels = psf.permute(2, 0, 1, 3, 4).unsqueeze(0)  # [1, C, H, W, ks, ks]
-        y = img_expand * kernels  # [B, C, H, W, ks, ks]
-        y = y.permute(0, 1, 4, 5, 2, 3).reshape(B, C * ks * ks, H * W)
-        img_render = F.fold(y, (H + ks - 1, W + ks - 1), (ks, ks), padding=0)
-    else:
-        assert chunk_size > 0, "chunk_size must be positive."
-
-        img_render = img.new_zeros(
-            B,
-            C,
-            H + pad_h_left + pad_h_right,
-            W + pad_w_left + pad_w_right,
-        )
-
-        for y0 in range(0, H, chunk_size):
-            y1 = min(y0 + chunk_size, H)
-            for x0 in range(0, W, chunk_size):
-                x1 = min(x0 + chunk_size, W)
-                img_patch = img[:, :, y0:y1, x0:x1]
-                psf_patch = psf[y0:y1, x0:x1, :, :, :]
-
-                patch_h, patch_w = y1 - y0, x1 - x0
-                img_patch = img_patch.unsqueeze(-1).unsqueeze(-1)
-                kernels = psf_patch.permute(2, 0, 1, 3, 4).unsqueeze(0)
-                y = img_patch * kernels
-                y = y.permute(0, 1, 4, 5, 2, 3).reshape(
-                    B, C * ks * ks, patch_h * patch_w
-                )
-                img_render[:, :, y0 : y1 + ks - 1, x0 : x1 + ks - 1] += (
-                    F.fold(
-                        y,
-                        (patch_h + ks - 1, patch_w + ks - 1),
-                        (ks, ks),
-                        padding=0,
-                    )
-                )
-
-    return img_render[
-        :,
-        :,
-        pad_h_left : pad_h_left + H,
-        pad_w_left : pad_w_left + W,
-    ]
 
 
 # ================================================
 # PSF map operations
 # ================================================
 def crop_psf_map(psf_map, grid, ks_crop, psf_center=None):
-    """Crop the center part of each PSF patch.
+    """Crop each tiled PSF kernel in a packed PSF map.
+
+    The input map stores a ``grid × grid`` array of PSF kernels in image form,
+    with shape ``[C, grid*ks, grid*ks]``. This function crops the center
+    ``ks_crop × ks_crop`` region from every kernel and renormalizes each color
+    channel independently.
 
     Args:
-        psf_map (torch.Tensor): [C, grid*ks, grid*ks]
-        grid (int): grid number
-        ks_crop (int): cropped PSF kernel size
-        psf_center (torch.Tensor): (grid, grid, 2) center of the PSF patch
+        psf_map (torch.Tensor): Packed PSF map, shape
+            ``[C, grid*ks, grid*ks]`` or ``[1, C, grid*ks, grid*ks]``.
+        grid (int): Number of PSF grid cells per spatial dimension.
+        ks_crop (int): Output kernel size for each cropped PSF.
+        psf_center (torch.Tensor, optional): Custom crop centers. This path is
+            currently not tested.
 
     Returns:
-        psf_map_crop (torch.Tensor): [C, grid*ks_crop, grid*ks_crop]
+        torch.Tensor: Cropped packed PSF map, shape
+            ``[C, grid*ks_crop, grid*ks_crop]``.
     """
     if len(psf_map.shape) == 4:
         psf_map = psf_map.squeeze(0)
@@ -571,15 +613,22 @@ def crop_psf_map(psf_map, grid, ks_crop, psf_center=None):
 
 
 def interp_psf_map(psf_map, grid_old, grid_new):
-    """Interpolate the PSF map from [C, grid_old*ks, grid_old*ks] to [C, grid_new*ks, grid_new*ks]. Usecase: I want to interpolate the PSF map from 10x10 grid to 20x20 grid.
+    """Resample a PSF map to a different spatial grid size.
+
+    Supports either a packed map ``[C, grid_old*ks, grid_old*ks]`` or an
+    unpacked map ``[grid_old, grid_old, C, ks, ks]``. Each kernel sample
+    location is bilinearly interpolated across the PSF grid, and the result is
+    returned in packed-map layout.
 
     Args:
-        psf_map (torch.Tensor): [C, grid_old*ks, grid_old*ks]
-        grid_old (int): old grid number
-        grid_new (int): new grid number
+        psf_map (torch.Tensor): Packed or unpacked PSF map.
+        grid_old (int): Input grid size. Ignored for unpacked input, where the
+            grid size is read from ``psf_map``.
+        grid_new (int): Output grid size.
 
     Returns:
-        psf_map_interp (torch.Tensor): [C, grid_new*ks, grid_new*ks]
+        torch.Tensor: Interpolated packed PSF map, shape
+            ``[C, grid_new*ks, grid_new*ks]``.
     """
     if len(psf_map.shape) == 3:
         # [C, grid_old*ks, grid_old*ks]
@@ -628,14 +677,18 @@ def interp_psf_map(psf_map, grid_old, grid_new):
 
 
 def read_psf_map(filename, grid=10):
-    """Read PSF map from a PSF map image.
+    """Read and normalize a packed RGB PSF map image.
+
+    The image is interpreted as a ``grid × grid`` array of PSF kernels. Each
+    RGB channel of each kernel is normalized independently so every channel
+    sums to one.
 
     Args:
-        filename (str): path to the PSF map image
-        grid (int): grid number
+        filename (str): Path to the PSF map image.
+        grid (int): Number of PSF grid cells per spatial dimension.
 
     Returns:
-        psf_map (torch.Tensor): [3, grid*ks, grid*ks]
+        torch.Tensor: Packed PSF map, shape ``[3, grid*ks, grid*ks]``.
     """
     psf_map = cv.cvtColor(cv.imread(filename), cv.COLOR_BGR2RGB)
     psf_map = torch.tensor(psf_map).permute(2, 0, 1).float() / 255.0
@@ -662,14 +715,17 @@ def read_psf_map(filename, grid=10):
 
 
 def rotate_psf(psf, theta):
-    """Rotate PSF by theta counter-clockwise. Rotation center is the center of the PSF.
+    """Rotate a batch of RGB PSF kernels counter-clockwise.
+
+    Rotation is performed around the center of each square PSF kernel using
+    ``F.grid_sample``.
 
     Args:
-        psf: (N, 3, ks, ks).
-        theta: (N,). rotation angle in radians (counter-clockwise).
+        psf (torch.Tensor): PSF batch, shape ``[N, 3, ks, ks]``.
+        theta (torch.Tensor): Rotation angles in radians, shape ``[N]``.
 
     Returns:
-        rotated_psf: (N, 3, ks, ks).
+        torch.Tensor: Rotated PSFs, shape ``[N, 3, ks, ks]``.
     """
     assert len(psf.shape) == 4, "PSF should be [N, 3, ks, ks]"
 
@@ -697,15 +753,22 @@ def rotate_psf(psf, theta):
 # Inverse PSF calculation from images
 # ================================================
 def solve_psf(img_org, img_render, ks=PSF_KS, eps=1e-6):
-    """Solve PSF, where img_render = img_org * psf.
+    """Estimate a spatially invariant PSF by frequency-domain deconvolution.
+
+    Solves the approximate relation ``img_render = img_org * psf`` in the
+    Fourier domain, crops the centered spatial-domain kernel to ``ks × ks``,
+    and normalizes each color channel.
 
     Args:
-        img_org (torch.Tensor): The object image tensor of shape [1, 3, H, W].
-        img_render (torch.Tensor): The simulated/observed image tensor of shape [1, 3, H, W].
-        eps (float): A small epsilon value to prevent division by zero in frequency domain.
+        img_org (torch.Tensor): Source image, shape ``[1, 3, H, W]``.
+        img_render (torch.Tensor): Rendered or observed image, shape
+            ``[1, 3, H, W]``.
+        ks (int): Output PSF kernel size.
+        eps (float): Small value to avoid division by zero in the frequency
+            domain.
 
     Returns:
-        psf (torch.Tensor): The PSF tensor of shape [3, ks, ks].
+        torch.Tensor: Estimated PSF, shape ``[3, ks, ks]``.
     """
     # Move to frequency domain
     F_org = torch.fft.fftn(img_org, dim=[2, 3])
@@ -732,16 +795,21 @@ def solve_psf(img_org, img_render, ks=PSF_KS, eps=1e-6):
 
 
 def solve_psf_map(img_org, img_render, ks=PSF_KS, grid=10):
-    """Solve PSF map by inverse convolution.
+    """Estimate a packed PSF map by solving one PSF per image patch.
+
+    Splits square input images into a ``grid × grid`` patch layout, estimates a
+    spatially invariant PSF for each corresponding patch pair using
+    :func:`solve_psf`, and stores the result as a packed PSF map.
 
     Args:
-        img_org (torch.Tensor): [B, 3, H, W]
-        img_render (torch.Tensor): [B, 3, H, W]
-        ks (int): PSF kernel size
-        grid (int): grid number
+        img_org (torch.Tensor): Source image batch, shape ``[B, 3, H, W]``.
+        img_render (torch.Tensor): Rendered image batch, shape
+            ``[B, 3, H, W]``.
+        ks (int): Output PSF kernel size.
+        grid (int): Number of PSF grid cells per spatial dimension.
 
     Returns:
-        psf_map (torch.Tensor): [3, grid*ks, grid*ks]
+        torch.Tensor: Packed PSF map, shape ``[3, grid*ks, grid*ks]``.
     """
     assert img_org.shape[-1] == img_org.shape[-2], "Image should be square"
     assert (img_org.shape[-1] % grid == 0) and (img_org.shape[-2] % grid == 0), (
