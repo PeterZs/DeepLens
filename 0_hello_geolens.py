@@ -1,4 +1,4 @@
-"""Hello, world! for DeepLens.
+"""Hello, world! for DeepLens GeoLens class.
 
 In this code, we will load a lens from a file. Then we will plot the lens setup
 and render a sample image with ray tracing and PSF-map image simulation.
@@ -23,7 +23,14 @@ from deeplens.config import DEPTH
 lens = GeoLens(filename='./datasets/lenses/cellphone/cellphone80deg.json')
 # lens = GeoLens(filename='./datasets/lenses/zemax_double_gaussian.zmx')
 
-lens.analysis(full_eval=True)
+save_name = "./lens"
+lens.draw_layout(filename=f"{save_name}.png")
+lens.analysis_spot()
+lens.draw_spot_radial(save_name=f"{save_name}_spot.png")
+lens.draw_mtf(depth_list=[lens.obj_depth], save_name=f"{save_name}_mtf.png")
+lens.draw_distortion_radial(save_name=f"{save_name}_distortion.png")
+lens.draw_field_curvature(save_name=f"{save_name}_field_curvature.png")
+lens.draw_vignetting(filename=f"{save_name}_vignetting.png", depth=lens.obj_depth)
 
 lens.write_lens_zmx()
 lens.write_lens_json()
