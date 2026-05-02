@@ -767,8 +767,6 @@ class GeoLens(
                 - psf_ks (int): Kernel size for PSF methods. Defaults to PSF_KS.
                 - patch_center (tuple): Center position for PSF patch method.
                 - spp (int): Samples per pixel for ray tracing. Defaults to SPP_RENDER.
-                - distortion (bool): For PSF map rendering, apply geometric
-                  distortion using ``warp()``. Defaults to True.
 
         Returns:
             Tensor: Rendered image tensor. Shape of [N, C, H, W].
@@ -785,11 +783,7 @@ class GeoLens(
             )
             psf_grid = kwargs.get("psf_grid", (10, 10))
             psf_ks = kwargs.get("psf_ks", PSF_KS)
-            if kwargs.get("distortion", True):
-                img_obj = self.warp(
-                    img_obj,
-                    depth=depth,
-                )
+            img_obj = self.warp(img_obj, depth=depth)
             img_render = self.render_psf_map(
                 img_obj, depth=depth, psf_grid=psf_grid, psf_ks=psf_ks
             )
