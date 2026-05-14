@@ -340,6 +340,31 @@ class Phase(DeepObj):
         self.w = self.r * float(np.sqrt(2))
         self.h = self.r * float(np.sqrt(2))
 
+    def phase2height_map(self, design_wvln, refractive_idx=1.5, res=512):
+        """Convert the phase map to a physical height map for DOE fabrication.
+
+        Derived from the phase-height relation of a transmissive DOE in air:
+            φ = 2π/λ · (n−1) · h  →  h = φ · λ / (2π · (n−1))
+
+        Args:
+            design_wvln: Design wavelength [um].
+            refractive_idx: Refractive index of the DOE material at ``design_wvln``.
+            res: Pixel resolution of the returned height map (square grid).
+
+        Returns:
+            Tensor of shape ``[res, res]`` with height values in the same units
+            as ``design_wvln`` (um).
+        """
+        x, y = torch.meshgrid(
+            torch.linspace(-self.w / 2, self.w / 2, res),
+            torch.linspace(self.h / 2, -self.h / 2, res),
+            indexing="xy",
+        )
+        x, y = x.to(self.device), y.to(self.device)
+        phi = self.phi(x, y)  # [0, 2π], shape [res, res]
+        height_map = phi * design_wvln / (2 * torch.pi * (refractive_idx - 1))
+        return height_map
+
     # =========================================
     # Visualization
     # =========================================
