@@ -54,8 +54,8 @@ class DefocusLens(Lens):
         self,
         foclen,
         fnum,
-        sensor_size=None,
-        sensor_res=None,
+        sensor_size=(8.0, 8.0),
+        sensor_res=(2000, 2000),
         device="cpu",
         primary_wvln=DEFAULT_WAVE,
         wvln_rgb=WAVE_RGB,
@@ -89,20 +89,6 @@ class DefocusLens(Lens):
         # Lens parameters
         self.foclen = foclen  # Focal length [mm]
         self.fnum = fnum
-
-        # Sensor size and resolution with defaults
-        if sensor_size is None:
-            sensor_size = (8.0, 8.0)
-            print(
-                f"Sensor_size not provided. Using default: {sensor_size} mm. "
-                "Use set_sensor() to change."
-            )
-        if sensor_res is None:
-            sensor_res = (2000, 2000)
-            print(
-                f"Sensor_res not provided. Using default: {sensor_res} pixels. "
-                "Use set_sensor() to change."
-            )
 
         # Configure sensor (sets sensor_size, sensor_res, pixel_size, r_sensor).
         self.set_sensor(sensor_size, sensor_res)
@@ -193,13 +179,13 @@ class DefocusLens(Lens):
         return psf
 
     def coc(self, depth):
-        """Calculate circle of confusion (CoC) [mm].
+        """Calculate circle of confusion (CoC) diameter [mm].
 
         Args:
             depth (torch.Tensor): Depth of the object. Shape [B].
 
         Returns:
-            coc (torch.Tensor): Circle of confusion. Shape [B].
+            coc (torch.Tensor): Circle of confusion diameter [mm]. Shape [B].
 
         Reference:
             [1] https://en.wikipedia.org/wiki/Circle_of_confusion
@@ -306,7 +292,6 @@ class DefocusLens(Lens):
         Returns:
             tuple: (left_psf, right_psf) where each PSF tensor has shape [N, ks, ks].
         """
-        N = points.shape[0]
         depth = points[:, 2]
 
         # Get the base PSF
@@ -384,24 +369,25 @@ class DefocusLens(Lens):
     # =============================================
     # RGBD rendering (occlusion-aware)
     # =============================================
-    def render_rgbd(self, img_obj, depth_map, method="psf_patch", **kwargs):
+    def render_rgbd(
+        self,
+        img_obj,
+        depth_map,
+        psf_ks=PSF_KS,
+        num_layers=16,
+    ):
         """Occlusion-aware RGBD rendering for defocus lens.
 
         Uses back-to-front layered compositing to prevent color bleeding at depth
         discontinuities. Since defocus lenses have no spatially varying
-        aberrations, all methods (psf_patch, psf_map, psf_pixel) produce
-        identical results; the `method` parameter is accepted for API
-        compatibility but ignored.
+        aberrations, rendering uses a spatially invariant PSF sampled across
+        depth layers.
 
         Args:
             img_obj (tensor): Object image. Shape [B, C, H, W].
             depth_map (tensor): Depth map [mm]. Shape [B, 1, H, W]. Values should be positive.
-            method (str, optional): Ignored (no spatial variation). Defaults to "psf_patch".
-            **kwargs: Additional keyword arguments:
-                - psf_ks (int): PSF kernel size. Defaults to PSF_KS.
-                - num_layers (int): Number of depth layers. Defaults to 16.
-                - depth_min (float): Minimum depth. Defaults to depth_map.min().
-                - depth_max (float): Maximum depth. Defaults to depth_map.max().
+            psf_ks (int, optional): PSF kernel size. Defaults to PSF_KS.
+            num_layers (int, optional): Number of depth layers. Defaults to 16.
 
         Returns:
             img_render (tensor): Rendered image. Shape [B, C, H, W].
@@ -415,10 +401,8 @@ class DefocusLens(Lens):
         if len(depth_map.shape) == 3:
             depth_map = depth_map.unsqueeze(1)  # [B, H, W] -> [B, 1, H, W]
 
-        psf_ks = kwargs.get("psf_ks", PSF_KS)
-        num_layers = kwargs.get("num_layers", 16)
-        depth_min = kwargs.get("depth_min", depth_map.min())
-        depth_max = kwargs.get("depth_max", depth_map.max())
+        depth_min = depth_map.min()
+        depth_max = depth_map.max()
 
         # Sample depth layers
         disp_ref, depths_ref = self._sample_depth_layers(depth_min, depth_max, num_layers)
@@ -438,12 +422,20 @@ class DefocusLens(Lens):
         img_render = conv_psf_occlusion(img_obj, -depth_map, psfs, depths_ref)
         return img_render
 
-    def render_rgbd_dp(self, rgb_img, depth):
+    def render_rgbd_dp(
+        self,
+        rgb_img,
+        depth,
+        psf_ks=PSF_KS,
+        num_layers=16,
+    ):
         """Render RGBD image with dual-pixel PSF.
 
         Args:
             rgb_img (tensor): [B, 3, H, W]
             depth (tensor): [B, 1, H, W]
+            psf_ks (int, optional): PSF kernel size. Defaults to PSF_KS.
+            num_layers (int, optional): Number of depth layers. Defaults to 16.
 
         Returns:
             img_left (tensor): [B, 3, H, W]
@@ -455,12 +447,10 @@ class DefocusLens(Lens):
 
         depth_min = depth.min()
         depth_max = depth.max()
-        num_depth = 10
         patch_center = (0.0, 0.0)
-        psf_ks = PSF_KS
 
         # Calculate dual-pixel PSF at reference depths
-        depths_ref = torch.linspace(depth_min, depth_max, num_depth, device=self.device)
+        depths_ref = torch.linspace(depth_min, depth_max, num_layers, device=self.device)
         points = torch.stack(
             [
                 torch.full_like(depths_ref, patch_center[0]),
@@ -471,7 +461,7 @@ class DefocusLens(Lens):
         )
         psfs_left, psfs_right = self.psf_rgb_dp(
             points=points, ks=psf_ks
-        )  # shape [num_depth, 3, ks, ks]
+        )  # shape [num_layers, 3, ks, ks]
 
         # Render dual-pixel image with PSF convolution and depth interpolation
         img_left = conv_psf_depth_interp(rgb_img, depth, psfs_left, depths_ref)

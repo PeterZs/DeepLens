@@ -402,6 +402,31 @@ class TestDefocusLensRendering:
         assert img_left.shape == rgb.shape
         assert img_right.shape == rgb.shape
 
+    def test_render_rgbd_dp_accepts_render_options(self, device_auto):
+        """Should accept the same PSF and layer options as render_rgbd."""
+        lens = DefocusLens(
+            foclen=50.0,
+            fnum=1.8,
+            sensor_size=(20.0, 20.0),
+            sensor_res=(64, 64),
+            device=device_auto,
+        )
+
+        lens.refocus(-1000.0)
+
+        rgb = torch.rand(1, 3, 64, 64, device=device_auto)
+        depth = torch.full((1, 1, 64, 64), -500.0, device=device_auto)
+
+        img_left, img_right = lens.render_rgbd_dp(
+            rgb,
+            depth,
+            psf_ks=31,
+            num_layers=8,
+        )
+
+        assert img_left.shape == rgb.shape
+        assert img_right.shape == rgb.shape
+
 
 class TestDefocusLensRenderRGBD:
     """Test occlusion-aware RGBD rendering."""
@@ -441,8 +466,8 @@ class TestDefocusLensRenderRGBD:
         assert not torch.isnan(result).any()
         assert result.sum() > 0
 
-    def test_render_rgbd_method_equivalence(self, device_auto):
-        """All methods should produce identical results for paraxial lens."""
+    def test_render_rgbd_rejects_method_argument(self, device_auto):
+        """render_rgbd should expose only defocus-specific rendering options."""
         lens = DefocusLens(
             foclen=50.0,
             fnum=1.8,
@@ -455,12 +480,8 @@ class TestDefocusLensRenderRGBD:
         rgb = torch.rand(1, 3, 64, 64, device=device_auto)
         depth = torch.full((1, 1, 64, 64), 500.0, device=device_auto)
 
-        result_patch = lens.render_rgbd(rgb, depth, method="psf_patch", num_layers=8)
-        result_map = lens.render_rgbd(rgb, depth, method="psf_map", num_layers=8)
-        result_pixel = lens.render_rgbd(rgb, depth, method="psf_pixel", num_layers=8)
-
-        assert torch.allclose(result_patch, result_map, atol=1e-5)
-        assert torch.allclose(result_patch, result_pixel, atol=1e-5)
+        with pytest.raises(TypeError):
+            lens.render_rgbd(rgb, depth, method="psf_patch", num_layers=8)
 
     def test_render_rgbd_depth_discontinuity(self, device_auto):
         """Should handle depth discontinuities (occlusion scenario)."""
