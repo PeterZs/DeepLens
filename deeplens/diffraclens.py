@@ -313,15 +313,13 @@ class DiffractiveLens(Lens):
                 # Collimated source: tilted plane wave at the chief-ray angle.
                 theta_x = math.atan(x_norm * sensor_w / 2 / self.foclen)
                 theta_y = math.atan(y_norm * sensor_h / 2 / self.foclen)
-                k = 2 * math.pi / (wvln * 1e-3)  # [mm^-1]
-                gx, gy = torch.meshgrid(
-                    torch.linspace(-0.5 * field_size[0], 0.5 * field_size[0], field_res[0], dtype=torch.float64),
-                    torch.linspace(0.5 * field_size[1], -0.5 * field_size[1], field_res[1], dtype=torch.float64),
-                    indexing="xy",
-                )
-                u = torch.exp(1j * k * (gx * math.sin(theta_x) + gy * math.sin(theta_y)))
-                inp_wave = ComplexWave(
-                    u=u, wvln=wvln, phy_size=field_size, res=field_res, z=0.0
+                inp_wave = ComplexWave.plane_wave(
+                    wvln=wvln,
+                    z=0.0,
+                    phy_size=field_size,
+                    res=field_res,
+                    theta_x=theta_x,
+                    theta_y=theta_y,
                 ).to(self.device)
             else:
                 # Finite-depth source: spherical wave from the object point.

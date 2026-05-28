@@ -11,6 +11,8 @@ This file contains:
     2. Wave field propagation functions (ASM, Rayleigh Sommerfeld, Fresnel, Fraunhofer, etc.)
 """
 
+import math
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -170,15 +172,27 @@ class ComplexWave(DeepObj):
         z=0.0,
         phy_size=(4.0, 4.0),
         res=(2000, 2000),
+        theta_x=0.0,
+        theta_y=0.0,
         valid_r=None,
     ):
         """Create a planar wave field on x0y plane.
+
+        With ``theta_x = theta_y = 0`` the result is a uniform unit-amplitude
+        plane wave travelling along ``+z``. Non-zero angles produce a tilted
+        (obliquely incident / off-axis) plane wave whose wavevector makes the
+        given angles with the optical axis; this adds the linear phase ramp
+        ``exp(i k (x sinθx + y sinθy))`` while the amplitude stays uniform.
 
         Args:
             wvln (float): Wavelength. [um].
             z (float): Field z position. [mm].
             phy_size (tuple): Physical size of the field. [mm].
             res (tuple): Resolution.
+            theta_x (float): Tilt angle of the wavevector in the x-z plane.
+                [rad]. Defaults to 0.0.
+            theta_y (float): Tilt angle of the wavevector in the y-z plane.
+                [rad]. Defaults to 0.0.
             valid_r (float): Valid circle radius. [mm].
 
         Returns:
@@ -187,7 +201,22 @@ class ComplexWave(DeepObj):
         assert wvln > 0.1 and wvln < 10.0, "Wavelength should be in [um]."
 
         # Create a plane wave field
-        u = torch.ones(res, dtype=torch.float64) + 0j
+        if theta_x == 0.0 and theta_y == 0.0:
+            # On-axis: uniform unit-amplitude field.
+            u = torch.ones(res, dtype=torch.float64) + 0j
+        else:
+            # Off-axis: tilted plane wave, i.e. a linear phase ramp.
+            k = 2 * torch.pi / (wvln * 1e-3)  # [mm^-1], wave number
+            x, y = torch.meshgrid(
+                torch.linspace(
+                    -0.5 * phy_size[0], 0.5 * phy_size[0], res[0], dtype=torch.float64
+                ),
+                torch.linspace(
+                    0.5 * phy_size[1], -0.5 * phy_size[1], res[1], dtype=torch.float64
+                ),
+                indexing="xy",
+            )
+            u = torch.exp(1j * k * (x * math.sin(theta_x) + y * math.sin(theta_y)))
 
         # Apply valid circle if provided
         if valid_r is not None:
