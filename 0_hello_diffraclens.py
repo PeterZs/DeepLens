@@ -3,13 +3,15 @@
 In this code, we load a paraxial diffractive lens (a single Fresnel DOE in
 front of the sensor) from a JSON configuration file. Each optical element is modelled as a phase
 function and the wavefront is propagated to the sensor with the Angular Spectrum
-Method (ASM). We then compute on-axis PSFs for an object at infinity and at a
-finite depth, and finally simulate an image by convolving a test chart with the
-RGB point spread function.
+Method (ASM). We then compute PSFs for on-axis and off-axis point sources (at
+infinity and at a finite depth), and finally simulate an image by convolving a
+test chart with the RGB point spread function.
 
 Note:
     DiffractiveLens runs in float64 for numerical stability of the wave
-    propagation step, and the PSF is computed on-axis (paraxial approximation).
+    propagation step. PSFs use the same points convention as GeoLens
+    (x, y normalised to [-1, 1], z = depth in mm); off-axis sources are
+    supported within the paraxial regime.
 
 Technical Paper:
     [1] Vincent Sitzmann et al., "End-to-end optimization of optics and image
@@ -41,18 +43,26 @@ print(f"DiffractiveLens with {len(lens.surfaces)} surface(s), "
 save_name = "./hello_diffraclens"
 ks = 128
 
+# Points use the (x, y, z) convention: x, y normalised to [-1, 1] (sensor
+# half-width/height), z = depth in mm (-inf for an object at infinity).
+
 # On-axis PSF for an object at infinity (plane wave input).
-psf_inf = lens.psf(depth=float("inf"), ks=ks)
+psf_inf = lens.psf(points=[0.0, 0.0, float("-inf")], ks=ks)
 print(f"Infinity-focus PSF: shape {tuple(psf_inf.shape)}, sum {psf_inf.sum():.3f}")
 
 # On-axis PSF for a finite object depth (point-source / spherical wave input).
-psf_near = lens.psf(depth=-500.0, ks=ks)
+psf_near = lens.psf(points=[0.0, 0.0, -500.0], ks=ks)
 print(f"Finite-depth PSF:  shape {tuple(psf_near.shape)}, sum {psf_near.sum():.3f}")
+
+# Off-axis PSF: a collimated source at normalised field x = 0.7.
+psf_off = lens.psf(points=[0.7, 0.0, float("-inf")], ks=ks)
+print(f"Off-axis PSF:      shape {tuple(psf_off.shape)}, sum {psf_off.sum():.3f}")
 
 # Save the PSFs as images (normalized for visualization).
 save_image(psf_inf[None].clamp(min=0), f"{save_name}_psf_inf.png", normalize=True)
 save_image(psf_near[None].clamp(min=0), f"{save_name}_psf_near.png", normalize=True)
-print(f"Saved PSF images to {save_name}_psf_inf.png and {save_name}_psf_near.png")
+save_image(psf_off[None].clamp(min=0), f"{save_name}_psf_offaxis.png", normalize=True)
+print(f"Saved PSF images: {save_name}_psf_inf.png, _psf_near.png, _psf_offaxis.png")
 
 # =====================================================================
 # Image simulation (PSF convolution)
@@ -64,7 +74,7 @@ img = read_image("./datasets/charts/Cam_acc_chart_6MP.png").float()[:3] / 255.0
 img = img.unsqueeze(0)  # [1, 3, H, W]
 lens.set_sensor_res((img.shape[-1], img.shape[-2]))  # (W, H)
 
-psf_render = lens.psf(depth=float("inf"), ks=64)
+psf_render = lens.psf(points=[0.0, 0.0, float("-inf")], ks=64)
 psf_rgb = psf_render[None].repeat(3, 1, 1).float()  # [3, ks, ks], fp32 for rendering
 img = img.to(psf_rgb)
 img_render = conv_psf(img, psf_rgb)

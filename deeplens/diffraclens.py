@@ -12,6 +12,7 @@ Reference papers:
 """
 
 import json
+import math
 
 import matplotlib.pyplot as plt
 import torch
@@ -302,24 +303,44 @@ class DiffractiveLens(Lens):
         img_render = conv_psf(img, psf)
         return img_render
 
-    def psf(self, depth=float("inf"), wvln=None, ks=PSF_KS, upsample_factor=1):
-        """Calculate monochromatic point PSF by wave propagation approach.
+    def psf(self, points, wvln=None, ks=PSF_KS, recenter=True, upsample_factor=1):
+        """Calculate the monochromatic PSF for one or more point sources.
+
+        Off-axis point sources are supported. The signature follows
+        :meth:`deeplens.lens.Lens.psf` and :meth:`deeplens.geolens.GeoLens.psf`.
 
         Args:
-            depth (float, optional): Depth of the point source. Defaults to float('inf').
+            points (torch.Tensor or list): Point source coordinates, shape
+                ``[N, 3]`` or ``[3]``. ``x, y`` are normalised to ``[-1, 1]``
+                (relative to the sensor half-width/height); ``z`` is the depth
+                in mm (negative; ``-inf`` for an object at infinity).
             wvln (float, optional): Wavelength in µm. When ``None`` (default),
                 falls back to ``self.primary_wvln``.
-            ks (int, optional): PSF kernel size. Defaults to PSF_KS.
-            upsample_factor (int, optional): Upsampling factor to meet Nyquist sampling constraint. Defaults to 1.
+            ks (int, optional): PSF kernel size in pixels. Defaults to PSF_KS.
+            recenter (bool, optional): If True, crop the PSF around the paraxial
+                image (chief-ray) location so off-axis PSFs stay centered.
+                Defaults to True.
+            upsample_factor (int, optional): Field upsampling factor to meet the
+                Nyquist sampling constraint. Defaults to 1.
 
         Returns:
-            psf_out (tensor): PSF. shape [ks, ks]
+            torch.Tensor: PSF intensity map, shape ``[ks, ks]`` for a single
+            point or ``[N, ks, ks]`` for a batch.
 
         Note:
-            [1] Usually we only consider the on-axis PSF because paraxial approximation is implicitly applied for wave optical model. For the shifted phase issue, refer to "Modeling off-axis diffraction with the least-sampling angular spectrum method".
+            A single Angular Spectrum Method (ASM) window is used, so very large
+            off-axis fields can suffer from the shifted-phase/aliasing issue;
+            see "Modeling off-axis diffraction with the least-sampling angular
+            spectrum method".
         """
         wvln = self.primary_wvln if wvln is None else wvln
-        # Sample input wave field (We have to sample high resolution to meet Nyquist sampling constraint)
+
+        if not torch.is_tensor(points):
+            points = torch.tensor(points, dtype=torch.float64)
+        single_point = points.dim() == 1
+        points = points.reshape(-1, 3)
+
+        # Field-plane sampling (high resolution to satisfy Nyquist).
         field_res = [
             self.surfaces[0].res[0] * upsample_factor,
             self.surfaces[0].res[1] * upsample_factor,
@@ -328,76 +349,98 @@ class DiffractiveLens(Lens):
             self.surfaces[0].res[0] * self.surfaces[0].ps,
             self.surfaces[0].res[1] * self.surfaces[0].ps,
         ]
-        if depth == float("inf"):
-            inp_wave = ComplexWave.plane_wave(
-                phy_size=field_size,
-                res=field_res,
-                wvln=wvln,
-                z=0.0,
-            ).to(self.device)
-        else:
-            inp_wave = ComplexWave.point_wave(
-                point=[0.0, 0.0, depth],
-                phy_size=field_size,
-                res=field_res,
-                wvln=wvln,
-                z=0.0,
-            ).to(self.device)
+        sensor_w, sensor_h = self.sensor_size
 
-        # Calculate intensity on the sensor. Shape [H_sensor, W_sensor]
-        output_wave = self.forward(inp_wave)
-        intensity = output_wave.u.abs() ** 2
+        psfs = []
+        for pt in points:
+            x_norm, y_norm, depth = float(pt[0]), float(pt[1]), float(pt[2])
 
-        # Interpolate wave to have the same pixel size as the sensor
-        factor = output_wave.ps / self.pixel_size
-        intensity = F.interpolate(
-            intensity,
-            scale_factor=(factor, factor),
-            mode="bilinear",
-            align_corners=False,
-        )[0, 0, :, :]
+            # Build the incident field for this (possibly off-axis) source.
+            if math.isinf(depth):
+                # Collimated source: tilted plane wave at the chief-ray angle.
+                theta_x = math.atan(x_norm * sensor_w / 2 / self.foclen)
+                theta_y = math.atan(y_norm * sensor_h / 2 / self.foclen)
+                k = 2 * math.pi / (wvln * 1e-3)  # [mm^-1]
+                gx, gy = torch.meshgrid(
+                    torch.linspace(-0.5 * field_size[0], 0.5 * field_size[0], field_res[0], dtype=torch.float64),
+                    torch.linspace(0.5 * field_size[1], -0.5 * field_size[1], field_res[1], dtype=torch.float64),
+                    indexing="xy",
+                )
+                u = torch.exp(1j * k * (gx * math.sin(theta_x) + gy * math.sin(theta_y)))
+                inp_wave = ComplexWave(
+                    u=u, wvln=wvln, phy_size=field_size, res=field_res, z=0.0
+                ).to(self.device)
+            else:
+                # Finite-depth source: spherical wave from the object point.
+                scale = -depth / self.foclen  # object height / image height
+                obj_x = x_norm * scale * sensor_w / 2
+                obj_y = y_norm * scale * sensor_h / 2
+                inp_wave = ComplexWave.point_wave(
+                    point=[obj_x, obj_y, depth],
+                    phy_size=field_size,
+                    res=field_res,
+                    wvln=wvln,
+                    z=0.0,
+                ).to(self.device)
 
-        # Center crop / pad the intensity to the sensor resolution. ``sensor_res``
-        # is (W, H) while the intensity tensor is indexed [H, W]; handle each
-        # dimension independently so that non-square sensors work correctly.
-        target_h, target_w = int(self.sensor_res[1]), int(self.sensor_res[0])
-        intensity_h, intensity_w = intensity.shape[-2:]
+            # Propagate to the sensor and compute intensity. Shape [H, W].
+            output_wave = self.forward(inp_wave)
+            intensity = output_wave.u.abs() ** 2
 
-        # Pad dimensions that are smaller than the sensor.
-        pad_h = max(target_h - intensity_h, 0)
-        pad_w = max(target_w - intensity_w, 0)
-        if pad_h > 0 or pad_w > 0:
+            # Resample to the sensor pixel pitch.
+            factor = output_wave.ps / self.pixel_size
+            intensity = F.interpolate(
+                intensity,
+                scale_factor=(factor, factor),
+                mode="bilinear",
+                align_corners=False,
+            )[0, 0, :, :]
+
+            # Center crop / pad to the sensor resolution. ``sensor_res`` is
+            # (W, H) while the intensity tensor is indexed [H, W]; handle each
+            # dimension independently so non-square sensors work correctly.
+            target_h, target_w = int(self.sensor_res[1]), int(self.sensor_res[0])
+            intensity_h, intensity_w = intensity.shape[-2:]
+            pad_h = max(target_h - intensity_h, 0)
+            pad_w = max(target_w - intensity_w, 0)
+            if pad_h > 0 or pad_w > 0:
+                intensity = F.pad(
+                    intensity,
+                    (pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2),
+                    mode="constant",
+                    value=0,
+                )
+            intensity_h, intensity_w = intensity.shape[-2:]
+            start_h = (intensity_h - target_h) // 2
+            start_w = (intensity_w - target_w) // 2
+            intensity = intensity[
+                start_h : start_h + target_h, start_w : start_w + target_w
+            ]
+
+            # Crop the ks x ks patch around the (chief-ray) image location. The
+            # paraxial image is inverted, so the normalised field (x, y) images
+            # to (-x, -y) on the sensor.
+            if recenter:
+                coord_c_j = int(round(target_w / 2 * (1 - x_norm)))
+                coord_c_i = int(round(target_h / 2 * (1 + y_norm)))
+            else:
+                coord_c_j = target_w // 2
+                coord_c_i = target_h // 2
+            coord_c_i = min(max(coord_c_i, 0), target_h - 1)
+            coord_c_j = min(max(coord_c_j, 0), target_w - 1)
             intensity = F.pad(
                 intensity,
-                (pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2),
+                [ks // 2, ks // 2, ks // 2, ks // 2],
                 mode="constant",
                 value=0,
             )
+            psf = intensity[coord_c_i : coord_c_i + ks, coord_c_j : coord_c_j + ks]
+            psf = psf / psf.sum()
+            psf = torch.flip(psf, [0, 1])
+            psfs.append(diff_float(psf))
 
-        # Center crop dimensions that are larger than the sensor.
-        intensity_h, intensity_w = intensity.shape[-2:]
-        start_h = (intensity_h - target_h) // 2
-        start_w = (intensity_w - target_w) // 2
-        intensity = intensity[
-            start_h : start_h + target_h, start_w : start_w + target_w
-        ]
-
-        # Crop the central patch from the sensor-resolution intensity map as the PSF
-        coord_c_i = int(target_h / 2)
-        coord_c_j = int(target_w / 2)
-        intensity = F.pad(
-            intensity,
-            [ks // 2, ks // 2, ks // 2, ks // 2],
-            mode="constant",
-            value=0,
-        )
-        psf = intensity[coord_c_i : coord_c_i + ks, coord_c_j : coord_c_j + ks]
-
-        # Normalize PSF
-        psf /= psf.sum()
-        psf = torch.flip(psf, [0, 1])
-
-        return diff_float(psf)
+        psf_out = torch.stack(psfs, dim=0)
+        return psf_out[0] if single_point else psf_out
 
     # =============================================
     # Visualization
@@ -459,7 +502,7 @@ class DiffractiveLens(Lens):
             eps (float, optional): Small value for log scale to avoid log(0). Defaults to 1e-4.
         """
         depth = self.obj_depth if depth is None else depth
-        psf_rgb = self.psf_rgb(point=[0, 0, depth], ks=ks)
+        psf_rgb = self.psf_rgb(points=[0.0, 0.0, depth], ks=ks)
 
         if log_scale:
             psf_rgb = torch.log10(psf_rgb + eps)

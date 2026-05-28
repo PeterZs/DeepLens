@@ -32,7 +32,7 @@ class TestDiffractiveLensPSF:
         """psf() returns [ks, ks] tensor."""
         lens = sample_diffraclens
         ks = 64
-        psf = lens.psf(ks=ks)
+        psf = lens.psf(points=[0.0, 0.0, float("-inf")], ks=ks)
         assert psf.shape == (ks, ks)
         assert (psf >= 0).all()
 
@@ -40,8 +40,25 @@ class TestDiffractiveLensPSF:
         """psf() works with finite depth."""
         lens = sample_diffraclens
         ks = 64
-        psf = lens.psf(depth=-500.0, ks=ks)
+        psf = lens.psf(points=[0.0, 0.0, -500.0], ks=ks)
         assert psf.shape == (ks, ks)
+
+    def test_psf_off_axis(self, sample_diffraclens):
+        """psf() supports off-axis point sources."""
+        lens = sample_diffraclens
+        ks = 64
+        psf = lens.psf(points=[0.3, 0.0, float("-inf")], ks=ks)
+        assert psf.shape == (ks, ks)
+        assert torch.isfinite(psf).all()
+        assert abs(float(psf.sum()) - 1.0) < 1e-3
+
+    def test_psf_batch(self, sample_diffraclens):
+        """psf() supports a batch of points -> [N, ks, ks]."""
+        lens = sample_diffraclens
+        ks = 64
+        points = [[0.0, 0.0, float("-inf")], [0.3, 0.0, float("-inf")]]
+        psf = lens.psf(points=points, ks=ks)
+        assert psf.shape == (2, ks, ks)
 
 
 class TestDiffractiveLensDeviceTransfer:
