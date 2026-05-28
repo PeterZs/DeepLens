@@ -15,6 +15,11 @@ This CoC formulation is the standard approach for defocus simulation, both in
 the literature and in software such as Blender. It captures defocus but not
 higher-order optical aberrations.
 
+Unique to this model, DefocusLens can also generate dual-pixel (DP) PSFs -- the
+left/right sub-aperture views recorded by dual-pixel sensors -- via ``psf_dp``,
+``psf_rgb_dp``, ``psf_map_dp`` and ``render_rgbd_dp``, which are useful for
+defocus- and depth-estimation research.
+
 Reference:
     [1] https://en.wikipedia.org/wiki/Circle_of_confusion
 """
