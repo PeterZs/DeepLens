@@ -28,7 +28,6 @@ lens = ParaxialLens(
     fnum=1.8,
     sensor_size=(20.0, 20.0),
     sensor_res=(64, 64),
-    device="cpu",
 )
 
 # Focus the lens at 1 m in front of the camera (depths are negative, in mm).

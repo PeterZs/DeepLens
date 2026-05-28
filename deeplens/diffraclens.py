@@ -97,6 +97,9 @@ class DiffractiveLens(Lens):
             self.foclen = float(self.d_sensor)
             self.calc_fov()
 
+        # Move all tensors (surfaces, sensor params) to the target device.
+        self.to(self.device)
+
     @classmethod
     def load_example1(cls):
         """Create an example diffractive lens with a single Fresnel DOE.
@@ -164,23 +167,26 @@ class DiffractiveLens(Lens):
 
             # Read sensor_size with default
             if "sensor_size" in data:
-                self.sensor_size = tuple(data["sensor_size"])
+                sensor_size = tuple(data["sensor_size"])
             else:
-                self.sensor_size = (8.0, 8.0)
+                sensor_size = (8.0, 8.0)
                 print(
-                    f"Sensor_size not found in lens file. Using default: {self.sensor_size} mm. "
+                    f"Sensor_size not found in lens file. Using default: {sensor_size} mm. "
                     "Consider specifying sensor_size in the lens file or using set_sensor()."
                 )
 
             # Read sensor_res with default
             if "sensor_res" in data:
-                self.sensor_res = tuple(data["sensor_res"])
+                sensor_res = tuple(data["sensor_res"])
             else:
-                self.sensor_res = (2000, 2000)
+                sensor_res = (2000, 2000)
                 print(
-                    f"Sensor_res not found in lens file. Using default: {self.sensor_res} pixels. "
+                    f"Sensor_res not found in lens file. Using default: {sensor_res} pixels. "
                     "Consider specifying sensor_res in the lens file or using set_sensor()."
                 )
+
+            # Configure sensor (also sets pixel_size and r_sensor).
+            self.set_sensor(sensor_size, sensor_res)
 
             # Load diffractive surfaces/elements
             d = 0.0

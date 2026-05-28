@@ -11,9 +11,7 @@ single on-axis PSF. For the full end-to-end joint optimization loop, see
 6_hybridlens_design.py.
 
 Note:
-    HybridLens runs in float64 for accurate phase tracing. We force device="cpu"
-    so the example also runs on machines whose default accelerator (e.g. Apple
-    MPS) does not support float64.
+    HybridLens runs in float64 for accurate phase tracing.
 
 Technical Paper:
     Xinge Yang, Matheus Souza, Kunyi Wang, Praneeth Chakravarthula, Qiang Fu,
@@ -32,7 +30,7 @@ torch.set_default_dtype(torch.float64)
 # Lens loading
 # =====================================================================
 # Load an example hybrid lens (an A489 refractive design + a Binary2 DOE).
-lens = HybridLens(filename="./datasets/lenses/hybridlens/a489_doe.json", device="cpu")
+lens = HybridLens(filename="./datasets/lenses/hybridlens/a489_doe.json")
 print(f"HybridLens: {len(lens.geolens.surfaces)} refractive surface(s) + "
       f"a {type(lens.doe).__name__} DOE.")
 

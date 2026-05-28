@@ -1,7 +1,7 @@
 """Hello, world! for DeepLens DiffractiveLens class.
 
-In this code, we construct a paraxial diffractive lens (a single Fresnel DOE in
-front of the sensor) from scratch. Each optical element is modelled as a phase
+In this code, we load a paraxial diffractive lens (a single Fresnel DOE in
+front of the sensor) from a JSON configuration file. Each optical element is modelled as a phase
 function and the wavefront is propagated to the sensor with the Angular Spectrum
 Method (ASM). We then compute on-axis PSFs for an object at infinity and at a
 finite depth, and save them as images.
@@ -18,25 +18,16 @@ Technical Paper:
         High Dynamic Range Imaging," CVPR 2020.
 """
 
-import torch
 from torchvision.utils import save_image
 
 from deeplens import DiffractiveLens
-from deeplens.diffractive_surface import Fresnel
 
 # =====================================================================
-# Lens construction
+# Lens loading
 # =====================================================================
-# Build a minimal diffractive lens programmatically: a single Fresnel DOE
-# focusing at f0 = 50 mm, placed one focal length in front of the sensor.
-# (We construct it by hand because the wave model is most transparent this way.)
-lens = DiffractiveLens(device="cpu")
-lens.surfaces = [Fresnel(f0=50, d=0, res=500, fab_ps=0.008)]
-lens.d_sensor = torch.tensor(50.0, dtype=torch.float64)
-lens.sensor_size = (4.0, 4.0)
-lens.sensor_res = (500, 500)
-lens.pixel_size = lens.sensor_size[0] / lens.sensor_res[0]
-lens.surfaces[0].to(lens.device)
+# Load a minimal diffractive lens (a single Fresnel DOE focusing at f0 = 50 mm,
+# one focal length in front of the sensor) from a JSON configuration file.
+lens = DiffractiveLens(filename="./datasets/lenses/diffraclens/hello_doelens.json")
 
 print(f"DiffractiveLens with {len(lens.surfaces)} surface(s), "
       f"sensor {lens.sensor_size} mm @ {lens.sensor_res} px.")
