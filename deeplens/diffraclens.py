@@ -56,6 +56,7 @@ class DiffractiveLens(Lens):
         self,
         filename=None,
         device=None,
+        dtype=torch.float32,
         primary_wvln=DEFAULT_WAVE,
         wvln_rgb=WAVE_RGB,
         obj_depth=DEPTH,
@@ -65,6 +66,8 @@ class DiffractiveLens(Lens):
         Args:
             filename (str, optional): Path to the lens configuration JSON file. If provided, loads the lens configuration from file. Defaults to None.
             device (str, optional): Computation device ('cpu' or 'cuda'). Defaults to 'cpu'.
+            dtype (torch.dtype, optional): Data type for computations. Defaults
+                to torch.float64 (needed for numerically stable wave propagation).
             primary_wvln (float, optional): Primary design wavelength [µm].
                 Used as fallback when a method is called without an explicit
                 ``wvln``.  Defaults to ``DEFAULT_WAVE``.
@@ -77,6 +80,7 @@ class DiffractiveLens(Lens):
         """
         super().__init__(
             device=device,
+            dtype=dtype,
             primary_wvln=primary_wvln,
             wvln_rgb=wvln_rgb,
             obj_depth=obj_depth,
@@ -91,7 +95,7 @@ class DiffractiveLens(Lens):
             self.sensor_size = (8.0, 8.0)
             self.sensor_res = (2000, 2000)
 
-        self.astype(torch.float64)
+        self.astype(self.dtype)
 
         # Use total track length (first element to sensor) as focal length
         if hasattr(self, "d_sensor"):
