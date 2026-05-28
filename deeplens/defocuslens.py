@@ -4,7 +4,16 @@
 # Licensed under the Apache License, Version 2.0.
 # See LICENSE file in the project root for full license information.
 
-"""Defocus lens model. This model does not use ray transfer (ABCD) matrices or thin-lens ray tracing; instead it pre-computes the circle-of-confusion (CoC) PSF from the focal length, F-number and focus distance and applies it directly. It simulates defocus blur (depth of field) but not optical aberrations, and is commonly used in software such as Blender.
+"""Defocus lens model based on the circle-of-confusion (CoC) PSF.
+
+This lens simulates defocus blur (depth of field) by pre-computing the
+circle-of-confusion PSF and applying it directly, instead of tracing rays. The
+CoC PSF is derived from paraxial optics: given the focal length, F-number and
+focus distance, the circle-of-confusion diameter at each object depth follows
+the paraxial defocus relation, and the resulting blur disk is used as the PSF.
+This CoC formulation is the standard approach for defocus simulation, both in
+the literature and in software such as Blender. It captures defocus but not
+higher-order optical aberrations.
 
 Reference:
     [1] https://en.wikipedia.org/wiki/Circle_of_confusion
