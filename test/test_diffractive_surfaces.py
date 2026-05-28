@@ -5,6 +5,7 @@ import torch
 
 from deeplens.diffractive_surface import (
     Binary2,
+    DiffractedRotation,
     DiffractiveSurface,
     Fresnel,
     Grating,
@@ -217,6 +218,36 @@ class TestRank1:
         assert doe.Q.requires_grad
 
 
+class TestDiffractedRotation:
+    """Tests for DiffractedRotation DOE."""
+
+    def test_init(self):
+        doe = DiffractedRotation(d=0.0, f0=50.0, num_wings=3, res=100)
+        assert doe.res == (100, 100)
+        assert doe.num_wings == 3
+        assert doe.wvln0 == pytest.approx(0.66)  # defaults to wvln_max
+
+    def test_phase_func_shape(self):
+        doe = DiffractedRotation(d=0.0, f0=50.0, res=100)
+        assert doe.phase_func().shape == (100, 100)
+
+    def test_phase_is_anisotropic(self):
+        """The rotating DOE is NOT transpose-symmetric (unlike a radial lens).
+
+        ``fab_ps`` is large enough that the lens OPD wraps across many matched
+        wavelengths, so the per-angle blaze makes the map angularly varying.
+        """
+        doe = DiffractedRotation(d=0.0, f0=50.0, num_wings=3, res=128, fab_ps=0.02)
+        phase = doe.phase_func()
+        assert not torch.allclose(phase, phase.T, atol=1e-3)
+
+    def test_optimizer_params(self):
+        doe = DiffractedRotation(d=0.0, f0=50.0, res=100)
+        params = doe.get_optimizer_params()
+        assert len(params) == 1
+        assert doe.f0.requires_grad
+
+
 class TestDiffractiveLensLoad:
     """The new surfaces load from JSON via DiffractiveLens and produce a PSF."""
 
@@ -227,5 +258,16 @@ class TestDiffractiveLensLoad:
             filename="./datasets/lenses/diffraclens/rank1.json", device=device_auto
         )
         psf = lens.psf(points=[0.0, 0.0, float("-inf")], ks=32)
+        assert psf.shape == (32, 32)
+        assert torch.isfinite(psf).all()
+
+    def test_load_diffracted_rotation(self, device_auto):
+        from deeplens import DiffractiveLens
+
+        lens = DiffractiveLens(
+            filename="./datasets/lenses/diffraclens/diffracted_rotation.json",
+            device=device_auto,
+        )
+        psf = lens.psf(points=[0.0, 0.0, float("-inf")], ks=32, wvln=0.55)
         assert psf.shape == (32, 32)
         assert torch.isfinite(psf).all()
