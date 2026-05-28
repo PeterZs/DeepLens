@@ -9,6 +9,7 @@ from deeplens.diffractive_surface import (
     Fresnel,
     Grating,
     Pixel2D,
+    Rank1,
     Zernike,
 )
 
@@ -184,3 +185,47 @@ class TestDiffractiveSurfaceBase:
         loss = doe.loss_quantization(bits=16)
         assert loss.dim() == 0
         assert loss.item() >= 0
+
+
+class TestRank1:
+    """Tests for Rank1 DOE."""
+
+    def test_init(self):
+        doe = Rank1(d=0.0, rank=1, res=100)
+        assert doe.res == (100, 100)
+        assert doe.V.shape == (100, 1)
+        assert doe.Q.shape == (100, 1)
+
+    def test_phase_func_shape(self):
+        doe = Rank1(d=0.0, rank=1, res=100)
+        phase = doe.phase_func()
+        assert phase.shape == (100, 100)
+
+    def test_height_is_low_rank(self):
+        """The pre-sigmoid height logits are exactly rank == `rank`."""
+        doe = Rank1(d=0.0, rank=1, res=100)
+        assert torch.linalg.matrix_rank(doe.V @ doe.Q.T) == 1
+        doe3 = Rank1(d=0.0, rank=3, res=100)
+        assert doe3.V.shape == (100, 3)
+        assert torch.linalg.matrix_rank(doe3.V @ doe3.Q.T) == 3
+
+    def test_optimizer_params(self):
+        doe = Rank1(d=0.0, rank=1, res=100)
+        params = doe.get_optimizer_params()
+        assert len(params) == 1
+        assert doe.V.requires_grad
+        assert doe.Q.requires_grad
+
+
+class TestDiffractiveLensLoad:
+    """The new surfaces load from JSON via DiffractiveLens and produce a PSF."""
+
+    def test_load_rank1(self, device_auto):
+        from deeplens import DiffractiveLens
+
+        lens = DiffractiveLens(
+            filename="./datasets/lenses/diffraclens/rank1.json", device=device_auto
+        )
+        psf = lens.psf(points=[0.0, 0.0, float("-inf")], ks=32)
+        assert psf.shape == (32, 32)
+        assert torch.isfinite(psf).all()
