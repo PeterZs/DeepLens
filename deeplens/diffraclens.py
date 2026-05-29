@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 from torchvision.utils import save_image
 
-from .config import DEFAULT_WAVE, DEPTH, PSF_KS, WAVE_RGB
+from .config import DEFAULT_WAVE, DEPTH, WAVE_RGB
 from .lens import Lens
 from .diffractive_surface import (
     Binary2,
@@ -197,7 +197,10 @@ class DiffractiveLens(Lens):
         data["info"] = self.lens_info if hasattr(self, "lens_info") else "None"
         data["surfaces"] = []
         data["d_sensor"] = round(self.d_sensor.item(), 3)
-        data["l_sensor"] = round(self.l_sensor, 3)
+        data["sensor_size"] = [
+            round(float(self.sensor_size[0]), 3),
+            round(float(self.sensor_size[1]), 3),
+        ]
         data["sensor_res"] = self.sensor_res
 
         # Save diffractive surfaces
@@ -216,6 +219,12 @@ class DiffractiveLens(Lens):
             if i < len(self.surfaces) - 1:
                 surf_dict["d_next"] = (
                     self.surfaces[i + 1].d.item() - self.surfaces[i].d.item()
+                )
+            else:
+                # Last surface: distance to the sensor. read_lens_json requires
+                # d_next on every surface, so the file must always include it.
+                surf_dict["d_next"] = round(
+                    float(self.d_sensor) - self.surfaces[i].d.item(), 3
                 )
 
             data["surfaces"].append(surf_dict)
@@ -255,14 +264,15 @@ class DiffractiveLens(Lens):
     # =============================================
     # Image simulation
     # =============================================
-    def render_mono(self, img, wvln=None, ks=PSF_KS):
+    def render_mono(self, img, wvln=None, ks=None):
         """Simulate monochromatic lens blur by convolving an image with the point spread function.
 
         Args:
             img (torch.Tensor): Input image. Shape: (B, 1, H, W)
             wvln (float, optional): Wavelength in µm. When ``None`` (default),
                 falls back to ``self.primary_wvln``.
-            ks (int, optional): PSF kernel size. Defaults to PSF_KS.
+            ks (int, optional): PSF kernel size. When ``None`` (default), the
+                full sensor resolution (``max(self.sensor_res)``) is used.
 
         Returns:
             torch.Tensor: Rendered image after applying lens blur with shape (B, 1, H, W).
@@ -272,7 +282,7 @@ class DiffractiveLens(Lens):
         img_render = conv_psf(img, psf)
         return img_render
 
-    def psf(self, points, wvln=None, ks=PSF_KS, recenter=True, upsample_factor=1):
+    def psf(self, points, wvln=None, ks=None, recenter=True, upsample_factor=1):
         """Calculate the monochromatic PSF for one or more point sources.
 
         Off-axis point sources are supported. The signature follows
@@ -285,10 +295,14 @@ class DiffractiveLens(Lens):
                 in mm (negative; ``-inf`` for an object at infinity).
             wvln (float, optional): Wavelength in µm. When ``None`` (default),
                 falls back to ``self.primary_wvln``.
-            ks (int, optional): PSF kernel size in pixels. Defaults to PSF_KS.
-            recenter (bool, optional): If True, crop the PSF around the paraxial
-                image (chief-ray) location so off-axis PSFs stay centered.
-                Defaults to True.
+            ks (int, optional): PSF kernel size in pixels. When ``None``
+                (default), the full sensor resolution
+                (``max(self.sensor_res)``) is used.
+            recenter (bool, optional): If True (default), crop the PSF around
+                its measured peak (argmax of the sensor-plane intensity) so
+                off-axis PSFs stay centered in the kernel. A diffractive lens
+                has no chief ray, so the peak location is measured rather than
+                predicted. If False, crop around the sensor center.
             upsample_factor (int, optional): Field upsampling factor to meet the
                 Nyquist sampling constraint. Defaults to 1.
 
@@ -303,6 +317,9 @@ class DiffractiveLens(Lens):
             spectrum method".
         """
         wvln = self.primary_wvln if wvln is None else wvln
+        # Default the kernel size to the full sensor resolution so the PSF
+        # spans the whole sensor (sensor_res is (W, H); use the larger side).
+        ks = max(int(self.sensor_res[0]), int(self.sensor_res[1])) if ks is None else ks
 
         if not torch.is_tensor(points):
             points = torch.tensor(points, dtype=torch.float64)
@@ -384,12 +401,15 @@ class DiffractiveLens(Lens):
                 start_h : start_h + target_h, start_w : start_w + target_w
             ]
 
-            # Crop the ks x ks patch around the (chief-ray) image location. The
-            # paraxial image is inverted, so the normalised field (x, y) images
-            # to (-x, -y) on the sensor.
+            # Crop the ks x ks patch around the PSF location. A diffractive lens
+            # has no chief ray to trace, so when ``recenter`` is True the crop
+            # center is the measured PSF peak (argmax of the simulated
+            # sensor-plane intensity); otherwise the crop stays at the sensor
+            # center.
             if recenter:
-                coord_c_j = int(round(target_w / 2 * (1 - x_norm)))
-                coord_c_i = int(round(target_h / 2 * (1 + y_norm)))
+                peak = torch.argmax(intensity)
+                coord_c_i = int(peak // target_w)
+                coord_c_j = int(peak % target_w)
             else:
                 coord_c_j = target_w // 2
                 coord_c_i = target_h // 2
@@ -464,7 +484,7 @@ class DiffractiveLens(Lens):
     def draw_psf(
         self,
         depth=None,
-        ks=PSF_KS,
+        ks=None,
         save_name="./psf_doelens.png",
         log_scale=True,
         eps=1e-4,
@@ -476,7 +496,9 @@ class DiffractiveLens(Lens):
         Args:
             depth (float, optional): Depth of the point source. When ``None``
                 (default), falls back to ``self.obj_depth``.
-            ks (int, optional): Size of the PSF kernel in pixels. Defaults to PSF_KS.
+            ks (int, optional): Size of the PSF kernel in pixels. When ``None``
+                (default), the full sensor resolution
+                (``max(self.sensor_res)``) is used.
             save_name (str, optional): Path to save the PSF image. Defaults to './psf_doelens.png'.
             log_scale (bool, optional): If True, display PSF in log scale. Defaults to True.
             eps (float, optional): Small value for log scale to avoid log(0). Defaults to 1e-4.
@@ -494,13 +516,23 @@ class DiffractiveLens(Lens):
     # =============================================
     # Optimization
     # =============================================
-    def get_optimizer(self, lr):
-        """Get optimizer for the lens parameters.
+    def get_optimizer(self, lr, optim_surf_ls=None):
+        """Build an Adam optimizer over the trainable diffractive surfaces.
 
         Args:
             lr (float): Learning rate.
+            optim_surf_ls (list[int], optional): Indices of the surfaces to
+                optimize. If None, all diffractive surfaces are optimized.
 
         Returns:
-            Optimizer: Optimizer object for lens parameters.
+            torch.optim.Optimizer: Adam optimizer over the selected surfaces'
+            phase parameters.
         """
-        return self.doe.get_optimizer(lr=lr)
+        if optim_surf_ls is None:
+            optim_surf_ls = list(range(len(self.surfaces)))
+
+        params = []
+        for idx in optim_surf_ls:
+            params += self.surfaces[idx].get_optimizer_params(lr=lr)
+
+        return torch.optim.Adam(params)
