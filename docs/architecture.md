@@ -8,7 +8,7 @@ Scene → [ Optics ] → Output PSF / Image
           GeoLens
         HybridLens
        DiffractiveLens
-        ParaxialLens
+        DefocusLens
         PSFNetLens
 ```
 
@@ -16,11 +16,11 @@ Scene → [ Optics ] → Output PSF / Image
 
 The `deeplens` package contains differentiable lens models that simulate how light passes through an optical system. Each lens computes a point spread function (PSF) and renders images via PSF convolution.
 
-- **`GeoLens`** — Multi-element refractive lens via differentiable ray tracing. The primary lens model, supporting Zemax/Code V/JSON file I/O. Uses a mixin architecture for PSF computation, evaluation, Seidel aberration analysis, optimization, surface operations, visualization, and tolerancing.
+- **`GeoLens`** — Multi-element refractive lens via differentiable ray tracing. The primary lens model, supporting Zemax/Code V/JSON file I/O. Uses a mixin architecture for PSF computation, evaluation, optimization, surface operations, and visualization.
 - **`HybridLens`** — JSON-defined refractive lens (`GeoLens`) combined with a diffractive optical element (DOE). Coherent ray tracing to the DOE plane, DOE phase modulation, then Angular Spectrum Method (ASM) propagation to the sensor.
 - **`DiffractiveLens`** — Pure wave-optics lens using diffractive surfaces and scalar diffraction.
 - **`PSFNetLens`** — Neural surrogate wrapping a `GeoLens` with an MLP for fast PSF prediction.
-- **`ParaxialLens`** — Thin-lens model for simple depth-of-field and bokeh simulation.
+- **`DefocusLens`** — Defocus (circle-of-confusion) model for depth-of-field and bokeh simulation.
 
 All lens types inherit from `Lens`, which defines the shared interface (`psf()`, `render()`, etc.). All optical objects inherit from `DeepObj`, which provides `to(device)`, `clone()`, and dtype conversion.
 
@@ -44,7 +44,9 @@ DeepLens uses several rendering paths:
 
 ### Lens JSON
 
-Lens JSON I/O preserves `is_aperture` markers and supports phase surfaces such as `Binary2Phase`. Hybrid-lens JSON files include a top-level `DOE` block; supported DOE models include `Binary2`, `Pixel2D`, `Fresnel`, `Zernike`, and `Grating`.
+Lens JSON I/O preserves `is_aperture` markers and supports phase surfaces such as `Binary2Phase`. Hybrid-lens JSON files include a top-level `DOE` block; supported DOE models include `Binary2`, `Pixel2D`, `Fresnel`, `Zernike`, `Grating`, and `Vortex`.
+
+`Phase.phase2height_map(design_wvln, refractive_idx, res)` converts any optimized phase profile to a physical height map (in µm) for fabrication, using the transmissive DOE relation φ = 2π/λ · (n−1) · h.
 
 ### Materials
 

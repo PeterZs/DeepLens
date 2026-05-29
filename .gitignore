@@ -13,6 +13,7 @@ deeplens/do_code/
 !images/*.png
 !assets/*.png
 !docs/assets/*.png
+!docs/assets/**/*.png
 debug.py
 *.log
 temp/*
@@ -21,6 +22,7 @@ dist/
 datasets/lenses/private/
 .claude/
 deeplens_core.egg-info/
+agent/
 
 lenses/pancake/
 datasets/BSDS300/
@@ -33,3 +35,4 @@ site/
 test/test_outputs
 visualization/
 research/
+docs/superpowers/

@@ -20,15 +20,13 @@ Abstract base class for all lens types. Defines the shared interface: `psf()`, `
 
 Differentiable multi-element refractive lens via geometric ray tracing. This is the primary lens model in DeepLens.
 
-`GeoLens` uses a mixin architecture — functionality is split across `GeoLensPSF`, `GeoLensEval`, `GeoLensSeidel`, `GeoLensOptim`, `GeoLensSurfOps`, `GeoLensVis`, `GeoLensIO`, `GeoLensTolerance`, and `GeoLensVis3D`.
+`GeoLens` uses a mixin architecture — functionality is split across `GeoLensPSF`, `GeoLensEval`, `GeoLensOptim`, `GeoLensSurfOps`, `GeoLensVis`, `GeoLensIO`, and `GeoLensVis3D`.
 
 ::: deeplens.GeoLens
 
 ::: deeplens.geolens_pkg.psf_compute.GeoLensPSF
 
 ::: deeplens.geolens_pkg.eval.GeoLensEval
-
-::: deeplens.geolens_pkg.eval_seidel.GeoLensSeidel
 
 ::: deeplens.geolens_pkg.optim.GeoLensOptim
 
@@ -37,8 +35,6 @@ Differentiable multi-element refractive lens via geometric ray tracing. This is 
 ::: deeplens.geolens_pkg.io.GeoLensIO
 
 ::: deeplens.geolens_pkg.vis.GeoLensVis
-
-::: deeplens.geolens_pkg.eval_tolerance.GeoLensTolerance
 
 ::: deeplens.geolens_pkg.vis3d.GeoLensVis3D
 
@@ -52,7 +48,7 @@ Pure wave-optics lens using diffractive surfaces and scalar diffraction propagat
 
 Thin-lens / circle-of-confusion model for simple depth-of-field and bokeh simulation.
 
-::: deeplens.ParaxialLens
+::: deeplens.DefocusLens
 
 Neural surrogate that wraps a `GeoLens` with an MLP to predict PSFs. Useful for fast, differentiable PSF evaluation during end-to-end training.
 
@@ -75,6 +71,32 @@ Even-asphere surface: spherical base with polynomial corrections.
 ::: deeplens.geometric_surface.Aspheric
 
 ::: deeplens.geometric_surface.Aperture
+
+---
+
+## Phase Surfaces
+
+Phase surfaces model flat diffractive optical elements (DOEs) and metasurfaces via a wavelength-scaled phase profile. All classes inherit from `Phase` and implement `phi()` (phase map) and `dphi_dxy()` (phase gradient) for the generalized Snell's law deflection in `diffract()`.
+
+> **Note**: `Phase.diffract()` treats the phase profile as wavelength-independent. Only the λ scaling in the generalized Snell's law and the OPL accumulation vary with wavelength. For a physical DOE whose phase profile changes with wavelength via the height-index relation `(n(λ)−1)·h`, use `DiffractiveSurface` instead.
+
+::: deeplens.phase_surface.Phase
+
+::: deeplens.phase_surface.Binary2Phase
+
+::: deeplens.phase_surface.FresnelPhase
+
+::: deeplens.phase_surface.ZernikePhase
+
+::: deeplens.phase_surface.PolyPhase
+
+::: deeplens.phase_surface.CubicPhase
+
+::: deeplens.phase_surface.GratingPhase
+
+::: deeplens.phase_surface.NURBSPhase
+
+::: deeplens.phase_surface.VortexPhase
 
 ---
 
