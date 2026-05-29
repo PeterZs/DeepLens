@@ -61,6 +61,62 @@ class TestDiffractiveLensPSF:
         assert psf.shape == (2, ks, ks)
 
 
+class TestDiffractiveLensOffAxisCentering:
+    """With recenter=False, the off-axis PSF is cropped around the perspective
+    (pinhole) image of the source, so the focus sits at the kernel center. This
+    also requires the un-inverted convention (a +x source images to the +x side),
+    otherwise the predicted center would not match the actual peak."""
+
+    @staticmethod
+    def _cpu_lens():
+        from deeplens import DiffractiveLens
+        from deeplens.diffractive_surface import Fresnel
+
+        old = torch.get_default_dtype()
+        lens = DiffractiveLens(device="cpu")
+        lens.surfaces = [Fresnel(f0=50, d=0, res=256, fab_ps=0.008)]
+        lens.surfaces[0].to(torch.device("cpu"))
+        lens.d_sensor = torch.tensor(50.0, dtype=torch.float64)
+        lens.foclen = 50.0
+        lens.sensor_size = (2.0, 2.0)
+        lens.sensor_res = (256, 256)
+        lens.pixel_size = lens.sensor_size[0] / lens.sensor_res[0]
+        torch.set_default_dtype(old)
+        return lens
+
+    def test_off_axis_x_centered_on_perspective_point(self):
+        """A +x source with recenter=False peaks at the kernel center."""
+        lens = self._cpu_lens()
+        ks = 64
+        psf = lens.psf(points=[0.7, 0.0, float("-inf")], ks=ks, recenter=False)
+        peak = int(torch.argmax(psf))
+        row, col = peak // ks, peak % ks
+        assert abs(col - ks // 2) <= ks // 8
+        assert abs(row - ks // 2) <= ks // 8
+
+    def test_off_axis_y_centered_on_perspective_point(self):
+        """A +y source with recenter=False peaks at the kernel center."""
+        lens = self._cpu_lens()
+        ks = 64
+        psf = lens.psf(points=[0.0, 0.7, float("-inf")], ks=ks, recenter=False)
+        peak = int(torch.argmax(psf))
+        row, col = peak // ks, peak % ks
+        assert abs(col - ks // 2) <= ks // 8
+        assert abs(row - ks // 2) <= ks // 8
+
+    def test_finite_depth_perspective_center_matches_focus(self):
+        """For an off-axis finite-depth source the perspective center (recenter
+        =False) must coincide with the true focus, just like the collimated
+        case. So the recenter=False peak should match the recenter=True peak;
+        if the two paths invert differently it instead catches a weak lobe."""
+        lens = self._cpu_lens()
+        ks = 64
+        pt = [0.7, 0.0, -5000.0]
+        peak_false = float(lens.psf(points=pt, ks=ks, recenter=False).max())
+        peak_true = float(lens.psf(points=pt, ks=ks, recenter=True).max())
+        assert peak_false >= 0.9 * peak_true
+
+
 class TestDiffractiveLensDeviceTransfer:
     """Tests for device transfer."""
 

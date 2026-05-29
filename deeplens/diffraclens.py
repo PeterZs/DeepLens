@@ -298,11 +298,13 @@ class DiffractiveLens(Lens):
             ks (int, optional): PSF kernel size in pixels. When ``None``
                 (default), the full sensor resolution
                 (``max(self.sensor_res)``) is used.
-            recenter (bool, optional): If True, crop the PSF around its
-                measured peak (argmax of the sensor-plane intensity) so
-                off-axis PSFs stay centered in the kernel. A diffractive lens
-                has no chief ray, so the peak location is measured rather than
-                predicted. If False (default), crop around the sensor center.
+            recenter (bool, optional): How the ks x ks kernel is centered (both
+                options keep off-axis PSFs centered in the kernel). If True,
+                crop around the measured peak (argmax of the sensor-plane
+                intensity). If False (default), crop around the perspective
+                (pinhole) image of the field point. The lens forms a physically
+                inverted image, but the result is flipped so the PSF is reported
+                in the sensor/source-sign convention (a +x source -> +x).
             upsample_factor (int, optional): Field upsampling factor to meet the
                 Nyquist sampling constraint. Defaults to 1.
 
@@ -340,9 +342,12 @@ class DiffractiveLens(Lens):
 
             # Build the incident field for this (possibly off-axis) source.
             if math.isinf(depth):
-                # Collimated source: tilted plane wave at the chief-ray angle.
-                theta_x = math.atan(x_norm * sensor_w / 2 / self.foclen)
-                theta_y = math.atan(y_norm * sensor_h / 2 / self.foclen)
+                # Collimated source: tilted plane wave. The tilt sign is negated
+                # so the source physically images to the inverted side (an object
+                # at +x focuses to -x), consistent with the finite-depth point
+                # source below; the inversion is undone by the flip further down.
+                theta_x = math.atan(-x_norm * sensor_w / 2 / self.foclen)
+                theta_y = math.atan(-y_norm * sensor_h / 2 / self.foclen)
                 inp_wave = ComplexWave.plane_wave(
                     wvln=wvln,
                     z=0.0,
@@ -398,18 +403,27 @@ class DiffractiveLens(Lens):
                 start_h : start_h + target_h, start_w : start_w + target_w
             ]
 
+            # The lens forms a physically inverted image (an object at +x focuses
+            # to -x). Flip both axes to report the PSF in the sensor / source-sign
+            # convention (+x source -> +x sensor position), consistent across the
+            # collimated and finite-depth paths.
+            intensity = torch.flip(intensity, [0, 1])
+
             # Crop the ks x ks patch around the PSF location. A diffractive lens
             # has no chief ray to trace, so when ``recenter`` is True the crop
             # center is the measured PSF peak (argmax of the simulated
-            # sensor-plane intensity); otherwise the crop stays at the sensor
-            # center.
+            # sensor-plane intensity); otherwise the crop center is the
+            # perspective (pinhole) image of the source field point.
             if recenter:
                 peak = torch.argmax(intensity)
                 coord_c_i = int(peak // target_w)
                 coord_c_j = int(peak % target_w)
             else:
-                coord_c_j = target_w // 2
-                coord_c_i = target_h // 2
+                # Perspective center: paraxial image of (x_norm, y_norm).
+                # +x maps to larger columns and +y to smaller rows, matching the
+                # un-inverted sensor-plane intensity.
+                coord_c_j = int(round(target_w * (1.0 + x_norm) / 2.0))
+                coord_c_i = int(round(target_h * (1.0 - y_norm) / 2.0))
             coord_c_i = min(max(coord_c_i, 0), target_h - 1)
             coord_c_j = min(max(coord_c_j, 0), target_w - 1)
             intensity = F.pad(
@@ -420,7 +434,6 @@ class DiffractiveLens(Lens):
             )
             psf = intensity[coord_c_i : coord_c_i + ks, coord_c_j : coord_c_j + ks]
             psf = psf / psf.sum()
-            psf = torch.flip(psf, [0, 1])
             psfs.append(diff_float(psf))
 
         psf_out = torch.stack(psfs, dim=0)
