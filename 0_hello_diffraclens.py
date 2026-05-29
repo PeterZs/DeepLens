@@ -38,22 +38,20 @@ lens = DiffractiveLens(filename="./datasets/lenses/diffraclens/fresnel.json")
 # PSF analysis
 # =====================================================================
 save_name = "./hello_diffraclens"
-# The Fresnel DOE is designed for 0.55 um; evaluate the PSF at that wavelength.
-wvln = 0.55
 
 # Points use the (x, y, z) convention: x, y normalised to [-1, 1] (sensor
 # half-width/height), z = depth in mm (-inf for an object at infinity).
 
 # On-axis PSF for an object at infinity (plane wave input).
-psf_inf = lens.psf(points=[0.0, 0.0, float("-inf")], wvln=wvln)
+psf_inf = lens.psf(points=[0.0, 0.0, float("-inf")], wvln=0.55)
 save_image(psf_inf[None].clamp(min=0), f"{save_name}_psf_inf.png", normalize=True)
 
 # On-axis PSF for a finite object depth (point-source / spherical wave input).
-psf_near = lens.psf(points=[0.0, 0.0, -500.0], wvln=wvln)
+psf_near = lens.psf(points=[0.0, 0.0, -500.0], wvln=0.55)
 save_image(psf_near[None].clamp(min=0), f"{save_name}_psf_near.png", normalize=True)
 
 # Off-axis PSF: a collimated source at normalised field x = 0.7.
-psf_off = lens.psf(points=[0.7, 0.0, float("-inf")], wvln=wvln)
+psf_off = lens.psf(points=[0.7, 0.0, float("-inf")], wvln=0.55)
 save_image(psf_off[None].clamp(min=0), f"{save_name}_psf_offaxis.png", normalize=True)
 
 # =====================================================================
@@ -66,7 +64,7 @@ img = read_image("./datasets/charts/Cam_acc_chart_6MP.png").float()[:3] / 255.0
 img = img.unsqueeze(0)  # [1, 3, H, W]
 lens.set_sensor_res((img.shape[-1], img.shape[-2]))  # (W, H)
 
-psf_render = lens.psf(points=[0.0, 0.0, float("-inf")], wvln=wvln, ks=64)
+psf_render = lens.psf(points=[0.0, 0.0, float("-inf")], wvln=0.55, ks=64)
 psf_rgb = psf_render[None].repeat(3, 1, 1).float()  # [3, ks, ks], fp32 for rendering
 img = img.to(psf_rgb)
 img_render = conv_psf(img, psf_rgb)
