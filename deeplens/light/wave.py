@@ -108,9 +108,12 @@ class ComplexWave(DeepObj):
         self.x, self.y = self.gen_xy_grid()  # x, y grid
         self.z = torch.full_like(self.x, z)  # z grid
 
-        # Cache propagation method boundaries (depend only on wvln, ps, phy_size)
-        self._asm_zmax = Nyquist_ASM_zmax(wvln=self.wvln, ps=self.ps, side_length=self.phy_size[0])
-        self._fresnel_zmin = Fresnel_zmin(wvln=self.wvln, ps=self.ps, side_length=self.phy_size[0])
+        # Cached reference distances (depend only on wvln, ps, phy_size).
+        # plain_asm_dist_max: Nyquist limit of plain ASM. prop() uses band-limited
+        #   ASM, which stays valid past this, so it is kept only for reference.
+        # fresnel_dist_min: distance above which single-FFT Fresnel is well-sampled.
+        self.plain_asm_dist_max = Nyquist_ASM_zmax(wvln=self.wvln, ps=self.ps, side_length=self.phy_size[0])
+        self.fresnel_dist_min = Fresnel_zmin(wvln=self.wvln, ps=self.ps, side_length=self.phy_size[0])
 
     @classmethod
     def point_wave(
@@ -285,7 +288,7 @@ class ComplexWave(DeepObj):
                 "The propagation distance in sub-wavelength range is not implemented yet. Have to use full wave method (e.g., FDTD)."
             )
 
-        elif prop_dist <= self._fresnel_zmin:
+        elif prop_dist <= self.fresnel_dist_min:
             # Band-limited ASM (Matsushima & Shimobaba 2009): rigorous angular
             # spectrum with a band-limit that suppresses aliasing. Valid across
             # the near and intermediate fields, so it covers the former gap
