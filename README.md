@@ -1,5 +1,5 @@
-<div style="text-align:center;">
-    <img src="assets/logo.png" alt="DeepLens logo" width="400"/>
+<div align="center">
+    <img src="assets/logo.png" alt="DeepLens logo" width="400px" >
 </div>
 
 # DeepLens
