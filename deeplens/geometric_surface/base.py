@@ -499,7 +499,7 @@ class Surface(DeepObj):
             y (tensor): y coordinate
             valid (tensor): valid mask
 
-        Return:
+        Returns:
             z (tensor): z = sag(x, y)
         """
         raise NotImplementedError(
@@ -528,7 +528,7 @@ class Surface(DeepObj):
             x (tensor): x coordinate
             y (tensor): y coordinate
 
-        Return:
+        Returns:
             dfdx (tensor): df / dx
             dfdy (tensor): df / dy
         """
@@ -563,7 +563,7 @@ class Surface(DeepObj):
             x (tensor): x coordinate
             y (tensor): y coordinate
 
-        Return:
+        Returns:
             d2fdx2 (tensor): d2f / dx2
             d2fdxdy (tensor): d2f / dxdy
             d2fdy2 (tensor): d2f / dy2

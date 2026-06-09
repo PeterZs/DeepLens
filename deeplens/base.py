@@ -59,8 +59,10 @@ class DeepObj:
             DeepObj: ``self`` (for chaining).
 
         Example:
-            >>> lens = GeoLens(filename="lens.json")
-            >>> lens.to("cuda")  # move all tensors to GPU
+            ```python
+            lens = GeoLens(filename="lens.json")
+            lens.to("cuda")  # move all tensors to GPU
+            ```
         """
         self.device = device
 
@@ -97,8 +99,10 @@ class DeepObj:
             AssertionError: If *dtype* is not a recognised floating-point dtype.
 
         Example:
-            >>> lens = GeoLens(filename="lens.json")
-            >>> lens.astype(torch.float64)  # switch to double precision
+            ```python
+            lens = GeoLens(filename="lens.json")
+            lens.astype(torch.float64)  # switch to double precision
+            ```
         """
         if dtype is None:
             return self

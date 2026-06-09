@@ -62,8 +62,10 @@ def conv_psf(img, psf):
         torch.Tensor: Rendered image, shape ``[B, C, H, W]``.
 
     Example:
-        >>> psf = lens.psf_rgb(points=torch.tensor([0.0, 0.0, -10000.0]))
-        >>> img_blur = conv_psf(img, psf)
+        ```python
+        psf = lens.psf_rgb(points=torch.tensor([0.0, 0.0, -10000.0]))
+        img_blur = conv_psf(img, psf)
+        ```
     """
     B, C, H, W = img.shape
     C_psf, ks, _ = psf.shape

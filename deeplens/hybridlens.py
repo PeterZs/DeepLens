@@ -290,8 +290,8 @@ class HybridLens(Lens):
                 for x/y and mm for z.
             wvln (float, optional): Wavelength in µm.  When ``None`` (default),
                 falls back to ``self.primary_wvln``.
-            spp (int, optional): Number of rays to sample.  Must be
-                >= 1,000,000 for accurate coherent simulation.  Defaults to
+            spp (int, optional): Number of rays to sample.  Must be at least
+                1,000,000 for accurate coherent simulation.  Defaults to
                 ``SPP_COHERENT``.
 
         Returns:

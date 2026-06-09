@@ -29,6 +29,15 @@ from .imgsim import (
 
 
 class Lens(DeepObj):
+    """Abstract base class for all lens models in DeepLens.
+
+    `Lens` defines the shared interface — PSF computation (`psf`, `psf_rgb`),
+    image rendering (`render`), sensor configuration, and JSON file I/O — that
+    `GeoLens`, `HybridLens`, `DiffractiveLens`, `PSFNetLens`, and `DefocusLens`
+    all inherit. Subclasses override the core optical methods (e.g. `psf`) with
+    their own differentiable implementations.
+    """
+
     def __init__(
         self,
         dtype=torch.float32,
@@ -183,9 +192,11 @@ class Lens(DeepObj):
             parameters so it can be used directly inside a training loop.
 
         Example:
-            >>> point = torch.tensor([0.0, 0.0, -10000.0])
-            >>> psf = lens.psf(points=point, ks=64, model="geometric")
-            >>> print(psf.shape)  # torch.Size([64, 64])
+            ```python
+            point = torch.tensor([0.0, 0.0, -10000.0])
+            psf = lens.psf(points=point, ks=64, model="geometric")
+            print(psf.shape)  # torch.Size([64, 64])
+            ```
         """
         raise NotImplementedError
 
@@ -531,8 +542,12 @@ class Lens(DeepObj):
             [2] "Efficient depth- and spatially-varying image simulation for defocus deblur", ICCVW 2025.
 
         Example:
-            >>> img_rendered = lens.render(img, depth=-10000.0, method="psf_patch",
-            ...                            patch_center=(0.3, 0.0), psf_ks=64)
+            ```python
+            img_rendered = lens.render(
+                img, depth=-10000.0, method="psf_patch",
+                patch_center=(0.3, 0.0), psf_ks=64,
+            )
+            ```
         """
         depth = self.obj_depth if depth is None else depth
         # Check sensor resolution
