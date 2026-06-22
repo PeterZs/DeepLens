@@ -97,6 +97,10 @@ class GeoLens(
         refractive optics," *Nature Communications* 2024.
     """
 
+    # GeoLens defaults to ray-tracing rendering (it can trace rays end-to-end),
+    # overriding the base `Lens` default of ``"psf_patch"``.
+    _default_render_method = "ray_tracing"
+
     def __init__(
         self,
         filename=None,
@@ -741,7 +745,7 @@ class GeoLens(
     # ====================================================================================
     # Image simulation
     # ====================================================================================
-    def render(self, img_obj, depth=None, method="ray_tracing", **kwargs):
+    def render(self, img_obj, depth=None, method=None, **kwargs):
         """Differentiable image simulation.
 
         Image simulation methods:
@@ -754,7 +758,8 @@ class GeoLens(
             depth (float, optional): Depth of the object. When ``None`` (default),
                 falls back to ``self.obj_depth``.
             method (str, optional): Image simulation method. One of 'psf_map', 'psf_patch',
-                or 'ray_tracing'. Defaults to 'ray_tracing'.
+                or 'ray_tracing'. When ``None`` (default), falls back to
+                ``self._default_render_method`` ('ray_tracing' for ``GeoLens``).
             **kwargs: Additional arguments for different methods:
                 - psf_grid (tuple): Grid size for PSF map method. Defaults to (10, 10).
                 - psf_ks (int): Kernel size for PSF methods. Defaults to PSF_KS.
@@ -764,6 +769,7 @@ class GeoLens(
         Returns:
             img_render (torch.Tensor): Rendered image tensor. Shape of [N, C, H, W].
         """
+        method = self._default_render_method if method is None else method
         depth = self.obj_depth if depth is None else depth
         B, C, Himg, Wimg = img_obj.shape
         Wsensor, Hsensor = self.sensor_res
@@ -1006,6 +1012,13 @@ class GeoLens(
         )
         focus_z = ray_axis.o[valid_axis, 2] + t * ray_axis.d[valid_axis, 2]
         focus_z = focus_z[~torch.isnan(focus_z) & (focus_z > 0)]
+        if focus_z.numel() == 0:
+            # Fail loudly instead of writing NaN (mean of empty) into self.foclen,
+            # which would silently poison calc_fov/calc_scale/set_fnum downstream.
+            raise ValueError(
+                "calc_foclen: no axial rays converged to a positive focus; the "
+                "lens may be degenerate or heavily vignetted."
+            )
         paraxial_focus_z = float(torch.mean(focus_z))
 
         # 2. Trace off-axis paraxial ray to paraxial focus, measure image height
@@ -1016,7 +1029,13 @@ class GeoLens(
         ray = ray.prop_to(paraxial_focus_z)
 
         # Compute the effective focal length
-        paraxial_imgh = (ray.o[:, 1] * ray.is_valid).sum() / ray.is_valid.sum()
+        valid_sum = ray.is_valid.sum()
+        if valid_sum.item() == 0:
+            raise ValueError(
+                "calc_foclen: no valid off-axis rays reached the paraxial focal "
+                "plane; cannot compute the effective focal length."
+            )
+        paraxial_imgh = (ray.o[:, 1] * ray.is_valid).sum() / valid_sum
         eff_foclen = paraxial_imgh.item() / float(np.tan(paraxial_fov))
         self.efl = eff_foclen
         self.foclen = eff_foclen
@@ -1313,9 +1332,9 @@ class GeoLens(
             ray_o = torch.tensor([[DELTA_PARAXIAL, 0, aper_z]], device=self.device).repeat(32, 1)
             phi_rad = torch.linspace(-0.01, 0.01, 32, device=self.device)
         else:
-            ray_o = torch.tensor([[aper_r, 0, aper_z]], device=self.device).repeat(SPP_CALC, 1)
+            ray_o = torch.tensor([[aper_r, 0, aper_z]], device=self.device).repeat(128, 1)  # pupil ray-fan size
             rfov = float(np.arctan(self.r_sensor / self.foclen))
-            phi_rad = torch.linspace(-rfov / 2, rfov / 2, SPP_CALC, device=self.device)
+            phi_rad = torch.linspace(-rfov / 2, rfov / 2, 128, device=self.device)
 
         d = torch.stack(
             (torch.sin(phi_rad), torch.zeros_like(phi_rad), torch.cos(phi_rad)), axis=-1
@@ -1398,9 +1417,9 @@ class GeoLens(
             ray_o = torch.tensor([[DELTA_PARAXIAL, 0, aper_z]], device=self.device).repeat(32, 1)
             phi = torch.linspace(-0.01, 0.01, 32, device=self.device)
         else:
-            ray_o = torch.tensor([[aper_r, 0, aper_z]], device=self.device).repeat(SPP_CALC, 1)
+            ray_o = torch.tensor([[aper_r, 0, aper_z]], device=self.device).repeat(128, 1)  # pupil ray-fan size
             rfov = float(np.arctan(self.r_sensor / self.foclen))
-            phi = torch.linspace(-rfov / 2, rfov / 2, SPP_CALC, device=self.device)
+            phi = torch.linspace(-rfov / 2, rfov / 2, 128, device=self.device)
 
         d = torch.stack(
             (torch.sin(phi), torch.zeros_like(phi), -torch.cos(phi)), axis=-1
@@ -1529,7 +1548,7 @@ class GeoLens(
         pupilr = None
         for _ in range(40):
             mid = 0.5 * (lo + hi)
-            self.surfaces[self.aper_idx].r = mid
+            self.surfaces[self.aper_idx].update_r(float(mid))
             _, pupilr = self.calc_entrance_pupil()
             if abs(pupilr - target_pupil_r) / target_pupil_r < 1e-3:
                 break

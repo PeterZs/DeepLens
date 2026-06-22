@@ -18,7 +18,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.fft import fft2, fftshift, ifft2, ifftshift
-from ..config import DELTA
+from ..config import DELTA, EPSILON
 from ..base import DeepObj
 
 
@@ -72,7 +72,8 @@ class ComplexWave(DeepObj):
         if u is not None:
             if not u.dtype == torch.complex128:
                 print(
-                    "A complex wave field is created with single precision. In the future, we want to always use double precision."
+                    "A complex wave field is created with single precision. " \
+                    "In the future, we want to always use double precision."
                 )
 
             self.u = u if torch.is_tensor(u) else torch.from_numpy(u)
@@ -98,8 +99,12 @@ class ComplexWave(DeepObj):
         assert wvln > 0.1 and wvln < 10.0, "Wavelength should be in [um]."
         self.wvln = wvln  # [um], wavelength
         self.k = 2 * torch.pi / (self.wvln * 1e-3)  # [mm^-1], wave number
+
+        # Physical size and pixel size
         self.phy_size = phy_size  # [mm], physical size
-        assert phy_size[0] / self.res[0] == phy_size[1] / self.res[1], (
+        px = phy_size[0] / self.res[0]
+        py = phy_size[1] / self.res[1]
+        assert abs(px - py) <= 1e-9 * max(abs(px), abs(py)) + 1e-12, (
             "Pixel size is not square."
         )
         self.ps = phy_size[0] / self.res[0]  # [mm], pixel size
@@ -118,7 +123,7 @@ class ComplexWave(DeepObj):
     @classmethod
     def point_wave(
         cls,
-        point=(0, 0, -1000.0),
+        point=(0.0, 0.0, -1000.0),
         wvln=0.55,
         z=0.0,
         phy_size=(4.0, 4.0),
@@ -128,11 +133,11 @@ class ComplexWave(DeepObj):
         """Create a spherical wave field on x0y plane originating from a point source.
 
         Args:
-            point (tuple): Point source position in object space. [mm]. Defaults to (0, 0, -1000.0).
+            point (tuple): Point source position in object space. [mm]. Defaults to (0.0, 0.0, -1000.0).
             wvln (float): Wavelength. [um]. Defaults to 0.55.
             z (float): Field z position. [mm]. Defaults to 0.0.
-            phy_size (tuple): Valid plane on x0y plane. [mm]. Defaults to (2, 2).
-            res (tuple): Valid plane resoltution. Defaults to (1000, 1000).
+            phy_size (tuple): Valid plane on x0y plane. [mm]. Defaults to (4.0, 4.0).
+            res (tuple): Valid plane resoltution. Defaults to (2000, 2000).
             valid_r (float): Valid circle radius. [mm]. Defaults to None.
 
         Returns:
@@ -153,7 +158,11 @@ class ComplexWave(DeepObj):
         )
 
         # Calculate distance to point source, and calculate spherical wave phase
-        r = torch.sqrt((x - point[0]) ** 2 + (y - point[1]) ** 2 + (z - point[2]) ** 2)
+        # Add EPSILON inside the sqrt so r is never exactly 0 (avoids 1/r blow-up
+        # and r.min()->0 when the source lies on the plane and on a grid node).
+        r = torch.sqrt(
+            (x - point[0]) ** 2 + (y - point[1]) ** 2 + (z - point[2]) ** 2 + EPSILON
+        )
         if point[2] < z:
             phi = k * r
         else:
@@ -285,7 +294,8 @@ class ComplexWave(DeepObj):
         elif prop_dist < wvln_mm:
             # Sub-wavelength distance: full wave method (e.g., FDTD)
             raise Exception(
-                "The propagation distance in sub-wavelength range is not implemented yet. Have to use full wave method (e.g., FDTD)."
+                "The propagation distance in sub-wavelength range is not implemented yet. " \
+                "Have to use full wave method (e.g., FDTD)."
             )
 
         elif prop_dist <= self.fresnel_dist_min:
@@ -318,12 +328,17 @@ class ComplexWave(DeepObj):
     # =============================================
     # Helper functions
     # =============================================
-
     def gen_xy_grid(self):
-        """Generate the x and y grid."""
+        """Generate the x and y grid, shape ``[H, W]`` (matching the field ``u``).
+
+        x runs along the width (``res[1]`` columns, extent ``phy_size[0]``) and y
+        along the height (``res[0]`` rows, extent ``phy_size[1]``), consistent with
+        ``point_wave``/``plane_wave``. With ``indexing="xy"`` the outputs are
+        ``(len(y_1d), len(x_1d)) = (H, W)``.
+        """
         x, y = torch.meshgrid(
-            torch.linspace(-0.5 * self.phy_size[1], 0.5 * self.phy_size[1], self.res[0],),
-            torch.linspace(0.5 * self.phy_size[0], -0.5 * self.phy_size[0], self.res[1],),
+            torch.linspace(-0.5 * self.phy_size[0], 0.5 * self.phy_size[0], self.res[1]),
+            torch.linspace(0.5 * self.phy_size[1], -0.5 * self.phy_size[1], self.res[0]),
             indexing="xy",
         )
         return x, y
@@ -338,7 +353,6 @@ class ComplexWave(DeepObj):
     # =============================================
     # Wave field I/O
     # =============================================
-
     def load(self, filepath):
         if filepath.endswith(".npz"):
             self.load_npz(filepath)
@@ -563,6 +577,12 @@ def BandLimitedASM(u, z, wvln, ps, n=1.0, padding=True):
     `AngularSpectrumMethod` that additionally stays valid across the
     intermediate field.
 
+    The band-limit only suppresses aliasing of the propagation kernel `H`. It
+    assumes the input field `u` is already Nyquist-sampled: if `u`'s local
+    fringe rate exceeds `1 / (2 * ps)` (steep spherical phase, large tilt, or a
+    high-NA lens/DOE phase), it is aliased before propagation and the output is
+    silently wrong.
+
     Args:
         u (tensor): complex field, shape [H, W] or [B, 1, H, W]
         z (float): propagation distance in [mm]
@@ -634,7 +654,8 @@ def BandLimitedASM(u, z, wvln, ps, n=1.0, padding=True):
 def ScalableASM(u, z, wvln, ps, n=1.0, padding=True):
     """Scalable angular spectrum method.
 
-    "ScalableASM allows for propagation models where the destination pixel pitch is larger than the source pixel pitch." Optica 2023.
+    "ScalableASM allows for propagation models where the destination pixel pitch is 
+    larger than the source pixel pitch." Optica 2023.
 
     Reference:
         [1] Scalable angular spectrum propagation. Optica 2023.
@@ -659,17 +680,14 @@ def FresnelDiffraction(u, z, wvln, ps, n=1.0, padding=True, TF=None):
         [2] https://qiweb.tudelft.nl/aoi/wavefielddiffraction/wavefielddiffraction.html
         [3] https://github.com/nkotsianas/fourier-propagation/blob/master/FTFP.m
     """
-    # Padding
+    # Padding. Unpack the last two dims as (H, W) for both [H, W] and [B, C, H, W].
     if padding:
-        try:
-            _, _, Worg, Horg = u.shape
-        except Exception:
-            Horg, Worg = u.shape
-        Wpad, Hpad = Worg // 2, Horg // 2
-        Wimg, Himg = Worg + 2 * Wpad, Horg + 2 * Hpad
+        Horg, Worg = u.shape[-2], u.shape[-1]
+        Hpad, Wpad = Horg // 2, Worg // 2
         u = F.pad(u, (Wpad, Wpad, Hpad, Hpad))
     else:
-        _, _, Wimg, Himg = u.shape
+        Hpad = Wpad = 0
+    Himg, Wimg = u.shape[-2], u.shape[-1]
 
     # Wave field parameters in medium
     assert wvln > 0.1 and wvln < 10.0, "wvln should be in [um]."
@@ -684,19 +702,21 @@ def FresnelDiffraction(u, z, wvln, ps, n=1.0, padding=True, TF=None):
             TF = False
 
     if TF:
-        # Only need frequency grids for TF method
+        # Frequency grids: fx over width (Wimg), fy over height (Himg) -> [H, W].
         fx_1d = torch.linspace(-0.5 / ps, 0.5 / ps, Wimg, device=u.device)
         fy_1d = torch.linspace(0.5 / ps, -0.5 / ps, Himg, device=u.device)
         fx, fy = torch.meshgrid(fx_1d, fy_1d, indexing="xy")
         H = torch.exp(-1j * torch.pi * wvln_mm * z * (fx**2 + fy**2))
         H = fftshift(H)
     else:
-        # Only need spatial grids for IR method
-        x_1d = torch.linspace(-0.5 * Wimg * ps, 0.5 * Himg * ps, Wimg, device=u.device)
-        y_1d = torch.linspace(0.5 * Wimg * ps, -0.5 * Himg * ps, Himg, device=u.device)
+        # Spatial grids: x over width (Wimg), y over height (Himg) -> [H, W].
+        x_1d = torch.linspace(-0.5 * Wimg * ps, 0.5 * Wimg * ps, Wimg, device=u.device)
+        y_1d = torch.linspace(0.5 * Himg * ps, -0.5 * Himg * ps, Himg, device=u.device)
         x, y = torch.meshgrid(x_1d, y_1d, indexing="xy")
         h_amp = 1 / (1j * wvln_mm * z)
-        h_const_phase = torch.exp(1j * k * z)
+        # exp(i k z) is a Python complex scalar; build with math (torch.exp
+        # rejects a non-tensor complex argument).
+        h_const_phase = complex(math.cos(k * z), math.sin(k * z))
         h_phase = torch.exp(1j * torch.pi / (wvln_mm * z) * (x**2 + y**2))
         h = h_const_phase * h_amp * h_phase
         H = fft2(fftshift(h)) * ps**2
@@ -705,9 +725,9 @@ def FresnelDiffraction(u, z, wvln, ps, n=1.0, padding=True, TF=None):
     # https://pytorch.org/docs/stable/generated/torch.fft.fftshift.html#torch.fft.fftshift
     u = ifftshift(ifft2(fft2(fftshift(u)) * H))
 
-    # Remove padding
+    # Remove padding (H axis by Hpad, W axis by Wpad)
     if padding:
-        u = u[..., Wpad:-Wpad, Hpad:-Hpad]
+        u = u[..., Hpad:-Hpad, Wpad:-Wpad]
 
     return u
 
@@ -729,14 +749,14 @@ def FraunhoferDiffraction(u, z, wvln, ps, n=1.0, padding=True):
     Reference:
         [1] Computational fourier optics : a MATLAB tutorial. Chapter 5, section 5.5.
     """
-    # Padding
+    # Padding. Unpack the last two dims as (H, W) for both [H, W] and [B, C, H, W].
     if padding:
-        Worg, Horg = u.shape
-        Wpad, Hpad = Worg // 4, Horg // 4
-        Wimg, Himg = Worg + 2 * Wpad, Horg + 2 * Hpad
+        Horg, Worg = u.shape[-2], u.shape[-1]
+        Hpad, Wpad = Horg // 4, Worg // 4
         u = F.pad(u, (Wpad, Wpad, Hpad, Hpad))
     else:
-        Wimg, Himg = u.shape
+        Hpad = Wpad = 0
+    Himg, Wimg = u.shape[-2], u.shape[-1]
 
     # side length
     wvln_mm = wvln / n * 1e-3  # [um] to [mm]
@@ -750,16 +770,18 @@ def FraunhoferDiffraction(u, z, wvln, ps, n=1.0, padding=True):
         indexing="xy",
     )
 
-    # Shorter propagation will not affect final result
+    # Shorter propagation will not affect final result. The constant phase
+    # exp(i k z) is a Python complex scalar (k, z are floats), so build it with
+    # math rather than torch.exp (which rejects a non-tensor complex argument).
     h_amp = 1 / (1j * wvln_mm * z)
-    h_const_phase = torch.exp(1j * k * z)
+    h_const_phase = complex(math.cos(k * z), math.sin(k * z))
     h_phase = torch.exp(1j * torch.pi / (wvln_mm * z) * (x2**2 + y2**2))
     h = h_amp * h_const_phase * h_phase
     u = h * ps**2 * ifftshift(fft2(fftshift(u)))
 
     # Remove padding
     if padding:
-        u = u[..., Wpad:-Wpad, Hpad:-Hpad]
+        u = u[..., Hpad:-Hpad, Wpad:-Wpad]
 
     return u
 
@@ -785,8 +807,9 @@ def RayleighSommerfeld(u, z, wvln, ps, n=1.0, memory_saving=True):
         torch.linspace(
             -0.5 * W * ps + 0.5 * ps, 0.5 * W * ps - 0.5 * ps, W, device=u.device
         ),
+        # y axis spans the H extent (not W); using W gave wrong y for non-square fields.
         torch.linspace(
-            0.5 * W * ps - 0.5 * ps, -0.5 * W * ps + 0.5 * ps, H, device=u.device
+            0.5 * H * ps - 0.5 * ps, -0.5 * H * ps + 0.5 * ps, H, device=u.device
         ),
         indexing="xy",
     )

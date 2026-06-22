@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 from torchvision.utils import save_image
 
-from .config import DEFAULT_WAVE, DEPTH, WAVE_RGB
+from .config import DEFAULT_WAVE, DEPTH, EPSILON, PSF_KS, WAVE_RGB
 from .lens import Lens
 from .diffractive_surface import (
     Binary2,
@@ -32,7 +32,7 @@ from .diffractive_surface import (
     Zernike,
 )
 from .imgsim import conv_psf
-from .ops import diff_float
+from .utils import diff_float
 from .light import ComplexWave
 
 
@@ -67,7 +67,8 @@ class DiffractiveLens(Lens):
         """Initialize a diffractive lens.
 
         Args:
-            filename (str, optional): Path to the lens configuration JSON file. If provided, loads the lens configuration from file. Defaults to None.
+            filename (str, optional): Path to the lens configuration JSON file. If provided, 
+                loads the lens configuration from file. Defaults to None.
             device (str, optional): Computation device ('cpu' or 'cuda'). Defaults to 'cpu'.
             dtype (torch.dtype, optional): Data type for the lens parameters.
                 Defaults to torch.float32; pass torch.float64 for
@@ -278,11 +279,15 @@ class DiffractiveLens(Lens):
             img_render (torch.Tensor): Rendered image after applying lens blur with shape (B, 1, H, W).
         """
         wvln = self.primary_wvln if wvln is None else wvln
-        psf = self.psf_infinite(wvln=wvln, ks=ks).unsqueeze(0)  # (1, ks, ks)
+        # On-axis PSF for an object at infinity. psf() returns [ks, ks] for a
+        # single point; add a leading channel dim for conv_psf -> (1, ks, ks).
+        psf = self.psf(
+            points=[0.0, 0.0, float("-inf")], wvln=wvln, ks=ks
+        ).unsqueeze(0)
         img_render = conv_psf(img, psf)
         return img_render
 
-    def psf(self, points, wvln=None, ks=None, recenter=False, upsample_factor=1):
+    def psf(self, points, wvln=None, ks=PSF_KS, **kwargs):
         """Calculate the monochromatic PSF for one or more point sources.
 
         Off-axis point sources are supported. The signature follows
@@ -295,18 +300,21 @@ class DiffractiveLens(Lens):
                 in mm (negative; ``-inf`` for an object at infinity).
             wvln (float, optional): Wavelength in µm. When ``None`` (default),
                 falls back to ``self.primary_wvln``.
-            ks (int, optional): PSF kernel size in pixels. When ``None``
-                (default), the full sensor resolution
-                (``max(self.sensor_res)``) is used.
-            recenter (bool, optional): How the ks x ks kernel is centered (both
-                options keep off-axis PSFs centered in the kernel). If True,
-                crop around the measured peak (argmax of the sensor-plane
-                intensity). If False (default), crop around the perspective
-                (pinhole) image of the field point. The lens forms a physically
-                inverted image, but the result is flipped so the PSF is reported
-                in the sensor/source-sign convention (a +x source -> +x).
-            upsample_factor (int, optional): Field upsampling factor to meet the
-                Nyquist sampling constraint. Defaults to 1.
+            ks (int, optional): PSF kernel size in pixels. Defaults to
+                ``PSF_KS``. Pass ``ks=None`` to use the full sensor resolution
+                (``max(self.sensor_res)``).
+            **kwargs: Model-specific options:
+                - recenter (bool): How the ks x ks kernel is centered (both
+                  options keep off-axis PSFs centered in the kernel). If True,
+                  crop around the measured peak (argmax of the sensor-plane
+                  intensity). If False (default), crop around the perspective
+                  (pinhole) image of the field point. The lens forms a
+                  physically inverted image, but the result is flipped so the
+                  PSF is reported in the sensor/source-sign convention (a +x
+                  source -> +x).
+                - upsample_factor (int): Field upsampling factor to meet the
+                  Nyquist sampling constraint. When ``None`` (default), a factor
+                  is chosen so the field resolution is close to 4000 x 4000.
 
         Returns:
             psf (torch.Tensor): PSF intensity map, shape ``[ks, ks]`` for a single
@@ -318,6 +326,8 @@ class DiffractiveLens(Lens):
             see "Modeling off-axis diffraction with the least-sampling angular
             spectrum method".
         """
+        recenter = kwargs.get("recenter", False)
+        upsample_factor = kwargs.get("upsample_factor", None)
         wvln = self.primary_wvln if wvln is None else wvln
         ks = max(int(self.sensor_res[0]), int(self.sensor_res[1])) if ks is None else ks
         if not torch.is_tensor(points):
@@ -325,10 +335,14 @@ class DiffractiveLens(Lens):
         single_point = points.dim() == 1
         points = points.reshape(-1, 3)
 
-        # Field-plane sampling (high resolution to satisfy Nyquist).
+        # Field-plane sampling (high resolution to satisfy Nyquist)
+        base_res = self.surfaces[0].res
+        if upsample_factor is None:
+            upsample_factor = max(1, round(4000 / self.surfaces[0].res[0]))
+
         field_res = [
-            self.surfaces[0].res[0] * upsample_factor,
-            self.surfaces[0].res[1] * upsample_factor,
+            base_res[0] * upsample_factor,
+            base_res[1] * upsample_factor,
         ]
         field_size = [
             self.surfaces[0].res[0] * self.surfaces[0].ps,
@@ -433,7 +447,7 @@ class DiffractiveLens(Lens):
                 value=0,
             )
             psf = intensity[coord_c_i : coord_c_i + ks, coord_c_j : coord_c_j + ks]
-            psf = psf / psf.sum()
+            psf = psf / (psf.sum() + EPSILON)
             psfs.append(diff_float(psf))
 
         psf_out = torch.stack(psfs, dim=0)

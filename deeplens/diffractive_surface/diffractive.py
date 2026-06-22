@@ -17,7 +17,7 @@ from torchvision.utils import save_image
 from ..config import EPSILON
 from ..base import DeepObj
 from ..material import Material
-from ..ops import diff_quantize
+from ..utils import diff_quantize
 
 logger = logging.getLogger(__name__)
 
@@ -423,7 +423,7 @@ class DiffractiveSurface(DeepObj):
             "wvln0": round(self.wvln0, 4),
             "res": self.res,
             "fab_ps": self.fab_ps,
-            "is_square": True,
+            "is_square": self.is_square,
         }
 
         return surf_dict
