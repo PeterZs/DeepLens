@@ -85,3 +85,4 @@ markers = [
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["deeplens*"]
